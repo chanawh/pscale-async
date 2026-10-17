@@ -44,6 +44,12 @@ class Settings(BaseSettings):
     chunk_size: int = 8192
     pattern_library_path: str = "./patterns/"
 
+    # --- Chunked pipeline (Celery group + chord fan-out) ---
+    # Object-storage uploads are split into line-count chunks processed by
+    # parallel workers. Distinct from chunk_size above (a byte count used
+    # for streaming I/O); this one bounds the work unit per worker.
+    chunk_lines: int = 10000
+
     # --- Upload object storage (API -> Celery handoff) ---
     # The API streams multipart uploads into the configured backend and hands
     # the worker a content reference (backend + bucket + key) — never a local

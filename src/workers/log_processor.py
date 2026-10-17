@@ -1,3 +1,61 @@
+"""Chunked fan-out/fan-in log processing pipeline.
+
+The original monolithic ``process_log_file`` god-task is decomposed for
+object-storage uploads while keeping its exact behavior for the legacy
+``file_path`` / ``log_lines`` inputs (kept verbatim at the bottom of this
+module behind the backwards-compatible entrypoint).
+
+Topology
+--------
+``process_log_file`` (backwards-compatible entrypoint)
+  └─ ``storage_ref`` given → ``fanout_process_log``
+       ├─ streams the object once to count lines (O(1) memory)
+       ├─ resolves/creates the Node row a single time
+       └─ ``chord(group(process_chunk × N), finalize_job)``
+
+Design notes (the trade-offs, stated plainly):
+
+* Chunks are addressed by *line ranges* ``[start, end)`` computed up
+  front. Each chunk re-streams the object and skips to its slice, so a
+  job costs N+1 object reads for N chunks. This is deliberately
+  stateless — no shared offset index to build, store, or keep consistent
+  across workers — and acceptable because chunks are large
+  (``CHUNK_LINES``, default 10k), so N stays small. Byte-offset chunking
+  would halve the reads but needs a distributed offset ledger; not worth
+  it here.
+
+* Retry safety is delete-then-recreate keyed on ``(job_id, chunk_index)``:
+  a chunk wipes its own previous output before reprocessing, so a
+  redelivery after a successful commit (at-least-once: commit landed,
+  ack lost) cannot duplicate incidents. Mid-task crashes need no
+  cleanup — the single commit at the end of the chunk rolls back with
+  the transaction, leaving nothing behind. Incidents from the legacy
+  monolithic path have ``chunk_index IS NULL`` and never match the
+  delete predicate. The full content-fingerprint dedup is a separately
+  queued change.
+
+* Partial failure: a chunk that exhausts its retries returns a failure
+  *result dict* instead of raising, so the chord always fires and
+  ``finalize_job`` can report honestly. (If a header task raised, the
+  chord callback would never run and the job would sit in PROCESSING
+  forever.) Any failed chunk marks the job FAILED with a per-chunk
+  error summary — ``JobStatus`` has no PARTIAL state, and adding one
+  would churn the API and frontend for little value. Incidents written
+  by succeeded chunks remain in the database either way.
+
+* Progress: each chunk atomically increments ``jobs.chunks_completed``
+  (``UPDATE ... SET chunks_completed = chunks_completed + 1``, safe
+  under concurrent workers) and ``job.progress`` tracks
+  completed/total chunks. Chunk tasks also report their own Celery
+  PROGRESS state, replacing the old per-100-lines updates.
+
+* Patterns are read per chunk from the database, not snapshotted by the
+  fan-out: the pattern library is CRUD-edited at runtime, and passing
+  pattern snapshots through the broker would bloat task messages and
+  freeze the set a job sees.
+"""
+
+import io
 import json
 import logging
 import os
@@ -5,8 +63,8 @@ import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from celery import current_task
-from sqlalchemy import create_engine
+from celery import chord, current_task, group
+from sqlalchemy import create_engine, update
 from sqlalchemy.orm import Session
 
 from src.core.celery import celery_app
@@ -18,9 +76,364 @@ from src.core.storage import (
 )
 from src.db.database import Base, SessionLocal
 from src.models import Incident, Job, JobStatus, Node, Pattern, Severity, Status
+from src.workers.chunking import compute_chunk_ranges, count_stream_lines
 
 # Setup logging
 logger = logging.getLogger(__name__)
+
+
+def _get_job_or_raise(db, job_id):
+    """Return ``(job, db)`` for the job row.
+
+    Tolerates the eager-mode commit-visibility race the original god-task
+    handled inline: on the retry path the passed session is closed and
+    replaced, so callers must use the returned session afterwards.
+    """
+    retry_count = 0
+    while retry_count < 3:
+        job = db.query(Job).filter(Job.id == job_id).first()
+        if job:
+            return job, db
+        retry_count += 1
+        import time
+
+        time.sleep(0.1)  # Short delay to allow transaction to propagate
+        db.close()
+        db = SessionLocal()
+    raise Exception(f"Job {job_id} not found after 3 retries")
+
+
+def _get_or_create_node(db, node_hostname, description):
+    """Resolve the node exactly once per job and return its id (or None).
+
+    ``Node.hostname`` is unique: letting N chunk workers get-or-create
+    concurrently would race on the constraint, so the fan-out does it once
+    and hands every chunk the id. Mirrors the god-task's fallback logic.
+    """
+    if not node_hostname:
+        return None
+    node = db.query(Node).filter(Node.hostname == node_hostname).first()
+    if node:
+        return node.id
+    node = Node(
+        hostname=node_hostname,
+        node_type="unknown",
+        description=f"Auto-created from log processing: {description or 'No description'}",
+    )
+    db.add(node)
+    db.commit()
+    db.refresh(node)
+    return node.id
+
+
+@celery_app.task(bind=True)
+def fanout_process_log(self, job_id, storage_ref, node_hostname=None, description=None):
+    """Fan-out entrypoint for object-storage uploads.
+
+    Counts the object's lines in one streaming pass, computes chunk
+    ranges, then dispatches ``chord(group(process_chunk × N),
+    finalize_job)``. Owns the job's transition to PROCESSING; the chord's
+    finalizer owns the terminal state.
+    """
+    db = SessionLocal()
+    try:
+        job, db = _get_job_or_raise(db, job_id)
+        ref = StorageReference.from_dict(storage_ref)
+        backend = backend_from_settings(settings)
+
+        # One streaming pass to count lines — O(1) memory. Chunk tasks
+        # re-stream to reach their own slices (see module docstring).
+        with backend.open_stream(ref) as stream:
+            total_lines = count_stream_lines(stream)
+
+        chunk_lines = settings.chunk_lines
+        ranges = compute_chunk_ranges(total_lines, chunk_lines)
+
+        # Single node resolution (see _get_or_create_node).
+        node_id = _get_or_create_node(db, node_hostname, description)
+
+        if not ranges:
+            # Empty file: complete directly. A zero-task chord has
+            # backend-dependent semantics, so never dispatch one.
+            job.status = JobStatus.COMPLETED
+            job.completed_at = datetime.utcnow()
+            job.progress = 100
+            job.total_chunks = 0
+            job.chunks_completed = 0
+            job.result_summary = json.dumps(
+                {
+                    "total_lines": 0,
+                    "processed_lines": 0,
+                    "incidents_created": 0,
+                    "patterns_matched": [],
+                    "total_chunks": 0,
+                    "failed_chunks": [],
+                }
+            )
+            db.commit()
+            logger.info(f"Job {job_id}: empty upload, completed with 0 chunks")
+            return {
+                "status": "completed",
+                "job_id": job_id,
+                "total_chunks": 0,
+                "total_lines": 0,
+            }
+
+        job.status = JobStatus.PROCESSING
+        job.started_at = datetime.utcnow()
+        job.total_chunks = len(ranges)
+        job.chunks_completed = 0
+        db.commit()
+
+        header = group(
+            process_chunk.s(
+                job_id=job_id,
+                chunk_index=i,
+                storage_ref=ref.to_dict(),
+                start_line=start,
+                end_line=end,
+                node_id=node_id,
+            )
+            for i, (start, end) in enumerate(ranges)
+        )
+        # The chord body is invoked as finalize_job(group_results, job_id).
+        chord(header, finalize_job.s(job_id=job_id)).apply_async()
+
+        logger.info(
+            f"Job {job_id}: fanned out into {len(ranges)} chunks "
+            f"({total_lines} lines, {chunk_lines} lines/chunk)"
+        )
+        return {
+            "status": "fanned_out",
+            "job_id": job_id,
+            "total_chunks": len(ranges),
+            "total_lines": total_lines,
+        }
+    except Exception as e:
+        logger.error(f"Job {job_id} fan-out failed: {str(e)}")
+        try:
+            job = db.query(Job).filter(Job.id == job_id).first()
+            if job:
+                job.status = JobStatus.FAILED
+                job.error_message = f"fan-out failed: {str(e)}"
+                job.completed_at = datetime.utcnow()
+                db.commit()
+        except Exception as db_error:
+            logger.error(f"Could not mark job {job_id} failed: {db_error}")
+        # Re-raise: in eager/dev mode the API's fallback then processes the
+        # upload synchronously via the legacy path instead of failing open.
+        raise
+    finally:
+        db.close()
+
+
+@celery_app.task(bind=True, max_retries=3)
+def process_chunk(
+    self, job_id, chunk_index, storage_ref, start_line, end_line, node_id=None
+):
+    """Process one line slice ``[start_line, end_line)`` of the stored object.
+
+    Owns its DB session, streams only its slice (O(1) memory), and runs the
+    per-line pattern-matching loop unchanged from the monolithic task.
+    Returns a result dict for the chord finalizer — including a failure
+    result when retries are exhausted, so the chord always fires.
+    """
+    db = SessionLocal()
+    try:
+        # --- Retry safety: delete-then-recreate, keyed on (job_id, chunk_index).
+        # Guards the at-least-once window (commit landed, ack lost →
+        # redelivery). See the module docstring for the full rationale.
+        db.query(Incident).filter(
+            Incident.job_id == job_id,
+            Incident.chunk_index == chunk_index,
+        ).delete(synchronize_session=False)
+
+        ref = StorageReference.from_dict(storage_ref)
+        backend = backend_from_settings(settings)
+
+        patterns = db.query(Pattern).filter(Pattern.is_active == True).all()
+        logger.info(
+            f"Job {job_id} chunk {chunk_index}: {len(patterns)} active patterns, "
+            f"lines [{start_line}, {end_line})"
+        )
+
+        incidents_created = 0
+        lines_in_slice = 0
+        matched_patterns = set()
+
+        with backend.open_stream(ref) as stream:
+            text = io.TextIOWrapper(stream, encoding="utf-8", errors="ignore")
+            for lineno, raw in enumerate(text):
+                if lineno < start_line:
+                    continue
+                if lineno >= end_line:
+                    break
+                lines_in_slice += 1
+                line = raw.strip()
+                if not line:
+                    continue
+
+                # --- Pattern matching: behavior-identical to the monolithic
+                # task. (The single-pass engine is a separately queued
+                # change; this loop is intentionally untouched.)
+                for pattern in patterns:
+                    try:
+                        if re.search(pattern.regex_pattern, line, re.IGNORECASE):
+                            # Create incident
+                            incident = Incident(
+                                title=f"Pattern Match: {pattern.name}",
+                                description=pattern.description
+                                or f"Log line matched pattern: {pattern.name}",
+                                severity=map_severity(pattern.severity_level),
+                                status=Status.OPEN,
+                                raw_log=line,
+                                node_id=node_id,
+                                pattern_id=pattern.id,
+                                job_id=job_id,
+                                chunk_index=chunk_index,
+                            )
+                            db.add(incident)
+                            incidents_created += 1
+                            matched_patterns.add(pattern.name)
+
+                    except re.error as e:
+                        # Log regex error but continue processing
+                        logger.error(f"Regex error in pattern {pattern.name}: {e}")
+                        continue
+
+        db.commit()
+
+        # --- Progress: atomic increment, safe under concurrent chunks. ---
+        db.execute(
+            update(Job)
+            .where(Job.id == job_id)
+            .values(chunks_completed=Job.chunks_completed + 1)
+        )
+        db.commit()
+        job = db.query(Job).filter(Job.id == job_id).first()
+        if job and job.total_chunks:
+            job.progress = int((job.chunks_completed or 0) / job.total_chunks * 100)
+            db.commit()
+
+        # Per-chunk Celery state replaces the old per-100-lines updates.
+        try:
+            self.update_state(
+                state="PROGRESS",
+                meta={
+                    "chunk_index": chunk_index,
+                    "start_line": start_line,
+                    "end_line": end_line,
+                    "lines": lines_in_slice,
+                    "incidents_created": incidents_created,
+                },
+            )
+        except Exception as celery_error:
+            logger.warning(f"Could not update Celery state: {celery_error}")
+
+        logger.info(
+            f"Job {job_id} chunk {chunk_index} done: "
+            f"{incidents_created} incidents from {lines_in_slice} lines"
+        )
+        return {
+            "chunk_index": chunk_index,
+            "status": "completed",
+            "lines": lines_in_slice,
+            "incidents_created": incidents_created,
+            "patterns_matched": sorted(matched_patterns),
+        }
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Job {job_id} chunk {chunk_index} failed: {str(e)}")
+        # Transient errors retry with backoff. Once retries are exhausted,
+        # return a failure RESULT instead of raising: the chord callback
+        # only fires when no header task raises, so raising here would
+        # leave the job stuck in PROCESSING with no honest final state.
+        if self.request.retries < self.max_retries:
+            raise self.retry(exc=e, countdown=60)
+        return {
+            "chunk_index": chunk_index,
+            "status": "failed",
+            "error": str(e),
+            "lines": 0,
+            "incidents_created": 0,
+            "patterns_matched": [],
+        }
+    finally:
+        db.close()
+
+
+@celery_app.task(bind=True)
+def finalize_job(self, chunk_results, job_id):
+    """Chord callback: aggregate chunk results into the job's terminal state.
+
+    Celery invokes this as ``finalize_job(group_results, job_id)``.
+    """
+    db = SessionLocal()
+    try:
+        job, db = _get_job_or_raise(db, job_id)
+        results = list(chunk_results or [])
+        failed = [
+            r for r in results if isinstance(r, dict) and r.get("status") == "failed"
+        ]
+        succeeded = [r for r in results if r not in failed]
+
+        total_lines = sum(r.get("lines", 0) for r in succeeded)
+        incidents_created = sum(r.get("incidents_created", 0) for r in succeeded)
+        patterns_matched = sorted(
+            {p for r in succeeded for p in r.get("patterns_matched", [])}
+        )
+
+        summary = {
+            "total_lines": total_lines,
+            "processed_lines": total_lines,
+            "incidents_created": incidents_created,
+            "patterns_matched": patterns_matched,
+            "total_chunks": len(results),
+            "failed_chunks": [r.get("chunk_index") for r in failed],
+        }
+        job.result_summary = json.dumps(summary)
+        job.progress = 100
+        job.completed_at = datetime.utcnow()
+
+        if failed:
+            # Honest partial failure. JobStatus has no PARTIAL state —
+            # adding one would churn the API and frontend for little value —
+            # so any failed chunk marks the job FAILED, with per-chunk
+            # errors preserved. Incidents written by succeeded chunks stay
+            # in the database.
+            job.status = JobStatus.FAILED
+            job.error_message = (
+                f"{len(failed)}/{len(results)} chunks failed "
+                f"(indexes {[r.get('chunk_index') for r in failed]}): "
+                + "; ".join(
+                    f"chunk {r.get('chunk_index')}: {r.get('error')}" for r in failed
+                )
+            )
+            logger.error(f"Job {job_id} partially failed: {job.error_message}")
+        else:
+            job.status = JobStatus.COMPLETED
+            job.error_message = None
+            logger.info(
+                f"Job {job_id} completed: {incidents_created} incidents from "
+                f"{total_lines} lines across {len(results)} chunks"
+            )
+
+        db.commit()
+        return {"job_id": job_id, "status": job.status.value, **summary}
+    except Exception as e:
+        logger.error(f"Job {job_id} finalize failed: {str(e)}")
+        try:
+            job = db.query(Job).filter(Job.id == job_id).first()
+            if job:
+                job.status = JobStatus.FAILED
+                job.error_message = f"finalize failed: {str(e)}"
+                job.completed_at = datetime.utcnow()
+                db.commit()
+        except Exception as db_error:
+            logger.error(f"Could not mark job {job_id} failed: {db_error}")
+        raise
+    finally:
+        db.close()
 
 
 @celery_app.task(bind=True)
@@ -33,16 +446,31 @@ def process_log_file(
     node_hostname: Optional[str] = None,
     description: Optional[str] = None,
 ):
-    """
-    Process a log file or log lines and extract incidents based on patterns.
+    """Backwards-compatible entrypoint for log processing.
 
-    The preferred input is ``storage_ref`` — a content reference
-    (``{"backend", "bucket", "key"}``) that the worker resolves through the
-    configured storage backend. This is the cross-container handoff: the
-    worker never assumes the upload exists on its local filesystem.
-    ``file_path`` (legacy) and ``log_lines`` (stream/cluster ingest) are
-    still accepted.
+    When ``storage_ref`` (an object-storage content reference) is given,
+    the upload is fanned out into the chunked Celery group + chord
+    pipeline (:func:`fanout_process_log`), which owns the job's terminal
+    state. The legacy ``file_path`` and ``log_lines`` inputs keep the
+    original monolithic behavior below — the stream and cluster ingest
+    paths depend on it, so that body is preserved verbatim.
     """
+    if storage_ref is not None:
+        # Object-storage upload: hand off to the chunked pipeline. Returns
+        # a JSON-safe dict carrying the fan-out task id (returning the raw
+        # AsyncResult would break the json result serializer); the chord's
+        # finalizer owns the job's terminal state.
+        fanout_task = fanout_process_log.delay(
+            job_id=job_id,
+            storage_ref=storage_ref,
+            node_hostname=node_hostname,
+            description=description,
+        )
+        return {
+            "status": "fanned_out",
+            "job_id": job_id,
+            "fanout_task_id": fanout_task.id,
+        }
 
     # Get database session
     db = SessionLocal()

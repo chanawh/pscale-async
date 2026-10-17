@@ -37,6 +37,14 @@ class Job(Base):
     storage_bucket = Column(String(255), nullable=True)
     storage_key = Column(String(1024), nullable=True)
 
+    # Chunked pipeline progress: fan-out/fan-in bookkeeping. Each chunk
+    # task atomically increments chunks_completed
+    # (UPDATE ... SET chunks_completed = chunks_completed + 1, safe under
+    # concurrency) and job.progress tracks completed/total chunks.
+    # NULL for legacy monolithic jobs.
+    total_chunks = Column(Integer, nullable=True, default=0)
+    chunks_completed = Column(Integer, nullable=True, default=0)
+
     # Relationships
     incidents = relationship("Incident", back_populates="job")
 

@@ -39,6 +39,14 @@ class Incident(Base):
     pattern_id = Column(Integer, ForeignKey("patterns.id"), nullable=False, index=True)
     job_id = Column(String(255), ForeignKey("jobs.id"), nullable=False, index=True)
 
+    # Chunked pipeline: which fan-out slice wrote this incident. Used for
+    # retry safety — a retried chunk deletes its previous output via
+    # (job_id, chunk_index) before reprocessing, so a redelivery after a
+    # successful commit cannot duplicate incidents. NULL means the incident
+    # came from the legacy monolithic path; the delete predicate never
+    # matches NULL, so legacy incidents are never touched by chunk retries.
+    chunk_index = Column(Integer, nullable=True, index=True)
+
     # Relationships
     node = relationship("Node", back_populates="incidents")
     pattern = relationship("Pattern", back_populates="incidents")
