@@ -1,0 +1,5 @@
+Mar 30 14:15:32 node-01 isilon_d[1234]: [CRITICAL] System temperature exceeds threshold: 85C
+Mar 30 14:16:45 node-01 isi_migrate_d[4567]: [ERROR] Migration failed for volume /ifs/data/vol1: Connection timeout
+Mar 30 14:17:12 node-01 smartd[8901]: [WARNING] Drive 1.1 temperature rising: 75C
+Mar 30 14:20:30 node-01 isilon_d[3456]: [CRITICAL] Disk failure detected on bay 5, drive 2
+Mar 30 14:22:10 node-01 isi_job_d[7890]: [ERROR] Job engine failed: Backup job nightly_backup_20240330

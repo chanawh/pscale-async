@@ -1,0 +1,125 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: log_intelligence
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  # SSH Tunnel Service (from reference pattern)
+  isilon-tunnel:
+    image: docker.io/alpine:3.20
+    container_name: isilon-tunnel
+    restart: unless-stopped
+    environment:
+      MGMT_IP: "${ONEFS_HOST}"  # Set ONEFS_HOST in your .env — never commit a real IP
+      MGMT_PORT: "8080"          # OneFS Platform API port
+      JUMPHOST: "${ONEFS_HOST}"
+      ONEFS_USER: "${ONEFS_USER:-root}"  # SSH user for the OneFS cluster
+      JUMPPORT: "50019"
+      SSH_KEY: "/root/.ssh/id_ed25519"
+    command:
+      - sh
+      - -ec
+      - |
+          apk add --no-cache openssh busybox-extras
+          # Create new key with proper permissions
+          cat /root/.ssh/id_ed25519 > /tmp/id_ed25519
+          chmod 600 /tmp/id_ed25519
+          # SECURITY: host-key checking was StrictHostKeyChecking=no
+          # (trivially MITM-able). accept-new pins the key on first
+          # connection; pre-seed known_hosts from ONEFS_HOST_KEY for
+          # fully strict checking.
+          exec ssh -N \
+            -L 0.0.0.0:8080:${MGMT_IP}:${MGMT_PORT} \
+            -p ${JUMPPORT} \
+            -i /tmp/id_ed25519 \
+            -o StrictHostKeyChecking=accept-new \
+            -o BatchMode=yes \
+            -o ExitOnForwardFailure=yes \
+            -o ServerAliveInterval=60 \
+            -o ServerAliveCountMax=3 \
+            ${ONEFS_USER}@${JUMPHOST}
+    volumes:
+      - type: bind
+        source: 'C:\Users\chana13\.ssh'
+        target: /root/.ssh
+
+  api:
+    build:
+      context: .
+      dockerfile: docker/Containerfile.api
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/log_intelligence
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - ISILON_HOST=${ISILON_HOST:-isilon-tunnel}
+      - ISILON_PORT=${ISILON_PORT:-8080}
+      - ISILON_USER=${ISILON_USER:-root}
+      - ISILON_PASS=${ISILON_PASS:-}
+      - SECRET_KEY=${SECRET_KEY:-change-me-in-production}
+    depends_on:
+      - postgres
+      - redis
+    volumes:
+      - ./src:/app/src
+      - type: bind
+        source: ${SSH_KEY_PATH:-~/.ssh}
+        target: /root/.ssh
+    command: uvicorn src.app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  worker:
+    build:
+      context: .
+      dockerfile: docker/Containerfile.worker
+    environment:
+      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/log_intelligence
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - ISILON_HOST=${ISILON_HOST:-isilon-tunnel}
+      - ISILON_PORT=${ISILON_PORT:-8080}
+      - ISILON_USER=${ISILON_USER:-root}
+      - ISILON_PASS=${ISILON_PASS:-}
+      - SECRET_KEY=${SECRET_KEY:-change-me-in-production}
+    depends_on:
+      - postgres
+      - redis
+    volumes:
+      - ./src:/app/src
+      - type: bind
+        source: ${SSH_KEY_PATH:-~/.ssh}
+        target: /root/.ssh
+    command: celery -A src.core.celery worker --loglevel=info
+
+  celery-beat:
+    build:
+      context: .
+      dockerfile: docker/Containerfile.worker
+    environment:
+      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/log_intelligence
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+    depends_on:
+      - postgres
+      - redis
+    volumes:
+      - ./src:/app/src
+    command: celery -A src.core.celery beat --loglevel=info
+
+volumes:
+  postgres_data:

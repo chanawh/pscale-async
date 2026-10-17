@@ -1,0 +1,19 @@
+Mar 30 14:15:32 node-01 isilon_d[1234]: [CRITICAL] System temperature exceeds threshold: 85C
+Mar 30 14:16:45 node-01 isi_migrate_d[4567]: [ERROR] Migration failed for volume /ifs/data/vol1: Connection timeout
+Mar 30 14:17:12 node-01 smartd[8901]: [WARNING] Drive 1.1 temperature rising: 75C
+Mar 30 14:18:23 node-01 isilon_d[2345]: [INFO] Normal system operation resumed
+Mar 30 14:19:15 node-01 isi_iscsi_d[5678]: [ERROR] iSCSI connection lost to target 10.0.1.100
+Mar 30 14:20:30 node-01 isilon_d[3456]: [CRITICAL] Disk failure detected on bay 5, drive 2
+Mar 30 14:21:45 node-01 isi_job_d[7890]: [ERROR] Job engine failed: Backup job nightly_backup_20240330
+Mar 30 14:22:10 node-01 isi_nfsv4_d[1111]: [WARNING] NFS client timeout from 10.0.2.50
+Mar 30 14:23:25 node-01 isilon_d[2222]: [INFO] Cluster quorum achieved with 3 nodes
+Mar 30 14:24:40 node-01 isi_auth_d[3333]: [ERROR] LDAP authentication failed: server timeout
+Mar 30 14:25:55 node-01 smartd[4444]: [CRITICAL] SMART failure predicted on drive 3.2
+Mar 30 14:27:15 node-01 isi_smb_d[5555]: [WARNING] SMB connection dropped from client WIN-CLIENT01
+Mar 30 14:28:30 node-01 isilon_d[6666]: [ERROR] Flex pool 'data_pool' degraded: 1 disk failed
+Mar 30 14:29:45 node-01 isi_audit_d[7777]: [INFO] Security audit: User admin accessed /ifs/home
+Mar 30 14:31:00 node-01 isi_monitor_d[8888]: [WARNING] Memory usage at 87% threshold
+Mar 30 14:32:15 node-01 isilon_d[9999]: [ERROR] Power supply failure on PSU-2
+Mar 30 14:33:30 node-01 isi_snap_d[1212]: [ERROR] Snapshot creation failed for /ifs/data
+Mar 30 14:34:45 node-01 isi_replication_d[1313]: [WARNING] Replication lag: 180 seconds
+Mar 30 14:36:00 node-01 isilon_d[1414]: [CRITICAL] File system corruption detected on /ifs/logs

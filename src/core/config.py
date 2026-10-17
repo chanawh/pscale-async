@@ -1,0 +1,79 @@
+import secrets
+from typing import Optional
+
+from pydantic import Field
+from pydantic_settings import BaseSettings
+
+
+def _default_secret_key() -> str:
+    """Generate an ephemeral JWT signing key when SECRET_KEY is not set.
+
+    pydantic-settings only calls this when the SECRET_KEY environment variable
+    is absent. An ephemeral key means tokens do not survive process restarts,
+    but it guarantees no two deployments accidentally share a hardcoded
+    default. Set SECRET_KEY explicitly in production.
+    """
+    return secrets.token_urlsafe(32)
+
+
+class Settings(BaseSettings):
+    # Database
+    database_url: str = "postgresql://postgres:postgres@postgres:5432/log_intelligence"
+
+    # Redis
+    redis_url: str = "redis://redis:6379/0"
+
+    # Celery
+    celery_broker_url: str = "redis://redis:6379/0"
+    celery_result_backend: str = "redis://redis:6379/0"
+
+    # API
+    api_host: str = "0.0.0.0"
+    api_port: int = 8000
+    api_debug: bool = False
+
+    # Security
+    # No default is committed. If SECRET_KEY is unset, an ephemeral per-process
+    # key is generated (JWTs won't survive restarts). Set SECRET_KEY in prod.
+    secret_key: str = Field(default_factory=_default_secret_key)
+    algorithm: str = "HS256"
+    access_token_expire_minutes: int = 30
+
+    # Log Processing
+    max_file_size_mb: int = 2048
+    chunk_size: int = 8192
+    pattern_library_path: str = "./patterns/"
+
+    # OneFS Cluster Configuration — no defaults are committed. Real-cluster
+    # features fail fast in OneFSClient when these are unset; set
+    # ONEFS_MOCK_MODE=true for local development without a cluster.
+    onefs_mock_mode: bool = False
+    onefs_host: Optional[str] = None
+    onefs_ssh_port: int = 22  # SSH port - Set ONEFS_SSH_PORT in production
+    onefs_api_port: int = 8080  # HTTP API port - Set ONEFS_API_PORT in production
+    onefs_user: Optional[str] = None
+    onefs_pass: str = ""  # Set ONEFS_PASS in production (never commit real credentials)
+    onefs_ssh_key_path: str = "~/.ssh/id_rsa"  # Set ONEFS_SSH_KEY_PATH in production
+
+    # Allowed base directory for remote log reads (defense against path traversal)
+    onefs_log_dir: str = "/var/log"
+
+    # Legacy / Demo OneFS Tunnel Configuration (kept for compatibility;
+    # prefer ONEFS_HOST / ONEFS_USER — these legacy aliases also fail fast
+    # when unset)
+    cluster_host: Optional[str] = None  # Legacy alias for onefs_host
+    cluster_port: int = 22  # Mapped from onefs_ssh_port
+    cluster_api_port: int = 8080  # Mapped from onefs_api_port
+    isilon_user: Optional[str] = None  # Legacy alias for onefs_user
+    isilon_pass: str = ""  # Mapped from onefs_pass
+    ssh_key_path: str = "~/.ssh/id_rsa"  # Mapped from onefs_ssh_key_path
+
+    # Legacy OneFS Tunnel Configuration (for Docker service names - disable for direct SSH)
+    isilon_host: str = "localhost"  # Changed from "isilon-tunnel" to "localhost" for direct connection
+    isilon_port: int = 8080
+
+    class Config:
+        env_file = ".env"
+
+
+settings = Settings()

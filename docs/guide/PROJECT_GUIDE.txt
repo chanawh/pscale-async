@@ -1,0 +1,632 @@
+# OneFS Log Intelligence - Complete Project Guide
+
+## 🎯 Project Overview
+
+A full-stack application for **Dell EMC Isilon OneFS** log intelligence analysis, featuring real-time incident detection, pattern matching, and comprehensive analytics dashboard.
+
+### Current Status
+- ✅ **Backend API**: Fully functional FastAPI service
+- ✅ **Database**: PostgreSQL with Alembic migrations
+- ✅ **Job Processing**: Celery workers with Redis queue
+- ✅ **Frontend**: React app with authentication and routing
+- 🔄 **UI Integration**: Pages need API integration completion
+
+---
+
+## 🏗️ Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    Frontend (React)                          │
+│  ┌─────────────┐ ┌─────────────┐ ┌─────────────┐ ┌─────────┐ │
+│  │ Dashboard   │ │   Jobs      │ │ Incidents   │ │Cluster  │ │
+│  │             │ │             │ │             │ │ Status  │ │
+│  └─────────────┘ └─────────────┘ └─────────────┘ └─────────┘ │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼ HTTP/WebSocket
+┌─────────────────────────────────────────────────────────────────┐
+│                  Backend (FastAPI)                            │
+│  ┌─────────────┐ ┌─────────────┐ ┌─────────────┐ ┌─────────┐ │
+│  │   Auth      │ │  Jobs API   │ │Incidents API│ │Cluster  │ │
+│  │             │ │             │ │             │ │ API     │ │
+│  └─────────────┘ └─────────────┘ └─────────────┘ └─────────┘ │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                    Infrastructure                             │
+│  ┌─────────────┐ ┌─────────────┐ ┌─────────────┐ ┌─────────┐ │
+│  │ PostgreSQL  │ │    Redis    │ │  Celery     │ │OneFS    │ │
+│  │ (Database)  │ │   (Queue)   │ │ (Workers)   │ │Cluster  │ │
+│  └─────────────┘ └─────────────┘ └─────────────┘ └─────────┘ │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 📁 Project Structure
+
+```
+test2/
+├── 🐳 docker-compose.yml              # Full stack deployment
+├── 🐳 docker-compose.full-stack.yml   # Production deployment
+├── 📄 alembic.ini                    # Database migration config
+├── 📄 pyproject.toml                  # Python project config
+├── 📄 requirements.txt                # Python dependencies
+│
+├── 📂 src/                           # Backend source code
+│   ├── 📂 app/                       # FastAPI application
+│   │   └── main.py                   # Main FastAPI app
+│   ├── 📂 api/                       # API routers
+│   │   ├── auth.py                   # Authentication endpoints
+│   │   ├── jobs.py                   # Job management
+│   │   ├── incidents.py              # Incident management
+│   │   └── ingest.py                # Log ingestion
+│   ├── 📂 core/                      # Core functionality
+│   │   ├── config.py                 # Configuration
+│   │   ├── celery.py                 # Celery setup
+│   │   └── database.py              # Database connection
+│   ├── 📂 db/                        # Database models
+│   │   └── database.py              # SQLAlchemy models
+│   └── 📂 models/                    # Pydantic models
+│
+├── 📂 frontend/                      # React frontend
+│   ├── 📂 src/
+│   │   ├── 📂 components/           # Reusable components
+│   │   │   ├── Layout.tsx           # Main layout
+│   │   │   ├── ProtectedRoute.tsx   # Auth wrapper
+│   │   │   └── ErrorBoundary.tsx    # Error handling
+│   │   ├── 📂 pages/                # Page components
+│   │   │   ├── Dashboard.tsx        # Main dashboard
+│   │   │   ├── Jobs.tsx             # Job management
+│   │   │   ├── Incidents.tsx        # Incident management
+│   │   │   ├── ClusterStatus.tsx    # Cluster status
+│   │   │   └── Login.tsx           # Authentication
+│   │   ├── 📂 hooks/                # React hooks
+│   │   │   └── useAuth.ts          # Authentication hook
+│   │   ├── 📂 services/             # API services
+│   │   │   └── api.ts              # API client
+│   │   ├── 📂 types/                # TypeScript types
+│   │   │   └── index.ts            # Type definitions
+│   │   ├── App.tsx                  # Main React app
+│   │   └── main.tsx                # Entry point
+│   ├── 📄 package.json              # Node.js dependencies
+│   └── 📄 vite.config.ts           # Vite configuration
+│
+├── 📂 alembic/                      # Database migrations
+│   └── 📂 versions/                 # Migration files
+│
+├── 📂 tests/                        # Test suites
+│   ├── 📂 unit/                     # Unit tests
+│   ├── 📂 integration/              # Integration tests
+│   └── conftest.py                 # Test configuration
+│
+├── 📂 scripts/                      # Utility scripts
+│   ├── setup_dev.sh                 # Development setup
+│   └── run_tests.sh                 # Test runner
+│
+├── 📂 docs/                         # Documentation
+│   └── onefs_integration.md         # OneFS setup guide
+│
+├── 📂 docker/                       # Docker configurations
+│   ├── Dockerfile.api               # API service
+│   └── Dockerfile.worker            # Celery worker
+│
+└── 📂 examples/                     # Example files
+    └── onefs_sample.txt            # Sample OneFS log
+```
+
+---
+
+## 🚀 Quick Start
+
+### Prerequisites
+- Docker & Docker Compose
+- Node.js 18+ (for frontend dev)
+- Python 3.9+ (for backend dev)
+
+### 1. Clone & Setup
+```bash
+git clone <repository-url>
+cd test2
+cp .env.example .env
+```
+
+### 2. Start Services
+```bash
+# Start all services
+docker-compose up -d
+
+# Check status
+docker-compose ps
+```
+
+### 3. Access Applications
+- **Frontend**: http://localhost:8080
+- **API**: http://localhost:8000
+- **API Docs**: http://localhost:8000/docs
+- **Database**: localhost:5432
+- **Redis**: localhost:6379
+
+### 4. Default Login
+- **Username**: admin
+- **Password**: admin123
+
+---
+
+## 🔧 Configuration
+
+### Environment Variables
+```env
+# Database
+DATABASE_URL=postgresql://postgres:postgres@postgres:5432/log_intelligence
+
+# Redis
+REDIS_URL=redis://redis:6379/0
+
+# OneFS Cluster (optional)
+ISILON_HOST=<your-cluster-ip>
+ISILON_PORT=8080
+ISILON_USER=root
+ISILON_PASS=a
+
+# Celery
+CELERY_BROKER_URL=redis://redis:6379/0
+CELERY_RESULT_BACKEND=redis://redis:6379/0
+```
+
+### Docker Services
+
+#### API Service
+- **Port**: 8000
+- **Image**: localhost/log-intelligence-api:latest
+- **Health Check**: `/health` endpoint
+
+#### Worker Service
+- **Framework**: Celery
+- **Purpose**: Async job processing
+- **Queue**: Redis
+
+#### Database Service
+- **Engine**: PostgreSQL 15
+- **Port**: 5432
+- **Persistence**: Docker volume
+
+#### Redis Service
+- **Version**: Redis 7-alpine
+- **Port**: 6379
+- **Purpose**: Job queue & caching
+
+---
+
+## 📊 Features & Capabilities
+
+### 🔍 Log Processing
+- **Pattern Matching**: 23+ OneFS-specific regex patterns
+- **Real-time Analysis**: Async processing with progress tracking
+- **Multiple Sources**: File upload, streaming, cluster ingestion
+- **Smart Detection**: Automatic hostname and node type detection
+
+### 🛡️ Incident Management
+- **Detection**: Automatic critical incident identification
+- **Classification**: LOW, MEDIUM, HIGH, CRITICAL severity levels
+- **Tracking**: OPEN, IN_PROGRESS, RESOLVED, ESCALATED status
+- **Updates**: Real-time status changes and notifications
+
+### 🌐 OneFS Integration
+- **SSH Tunnel**: Secure cluster connectivity
+- **Direct Access**: Platform API integration
+- **Log Streaming**: Real-time log ingestion
+- **Cluster Health**: Status monitoring and alerts
+
+### 📈 Analytics & Reporting
+- **Dashboard**: Comprehensive overview with metrics
+- **Trends**: Incident patterns and analytics
+- **Escalations**: High-priority incident tracking
+- **Job Management**: Complete job lifecycle tracking
+
+---
+
+## 🎨 Frontend Components
+
+### Core Pages
+- **Dashboard**: Main overview with statistics and recent activity
+- **Jobs**: Job management with upload, monitoring, and cancellation
+- **Incidents**: Incident listing with filtering and status updates
+- **Cluster Status**: OneFS cluster health and connectivity
+- **Login**: Authentication with JWT tokens
+
+### Technical Stack
+- **Framework**: React 18 with TypeScript
+- **Routing**: React Router v6
+- **State Management**: React Query (TanStack Query)
+- **Styling**: TailwindCSS with custom components
+- **Icons**: Lucide React
+- **Notifications**: React Hot Toast
+- **HTTP Client**: Axios with interceptors
+
+### Authentication Flow
+1. **Login**: JWT token generation and storage
+2. **Protected Routes**: Route guards with token validation
+3. **Auto-refresh**: Token refresh mechanism
+4. **Logout**: Token cleanup and redirect
+
+---
+
+## 🔌 Backend API
+
+### Core Endpoints
+
+#### Authentication
+```http
+POST /api/v1/auth/login          # User login
+POST /api/v1/auth/refresh       # Token refresh
+POST /api/v1/auth/logout        # User logout
+```
+
+#### Jobs Management
+```http
+GET  /api/v1/jobs              # List all jobs
+GET  /api/v1/jobs/{id}         # Get job details
+POST /api/v1/jobs/{id}/cancel  # Cancel job
+DELETE /api/v1/jobs/{id}       # Delete job
+```
+
+#### Incidents
+```http
+GET  /api/v1/incidents         # List incidents
+GET  /api/v1/incidents/{id}    # Get incident details
+PUT  /api/v1/incidents/{id}/status  # Update status
+```
+
+#### Log Ingestion
+```http
+POST /api/v1/ingest            # Upload log file
+POST /api/v1/ingest/stream     # Stream log lines
+POST /api/v1/ingest/cluster    # Ingest from OneFS
+```
+
+#### Analytics
+```http
+GET /api/v1/summary            # Get summary statistics
+GET /api/v1/escalations        # Get escalations
+```
+
+#### Cluster
+```http
+GET /api/v1/cluster/status     # Cluster health status
+```
+
+### Data Models
+
+#### Job Model
+```typescript
+interface Job {
+  id: string
+  filename: string
+  file_size?: number
+  status: 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'FAILED'
+  progress: number
+  result_summary?: string
+  error_message?: string
+  started_at?: string
+  completed_at?: string
+  created_at: string
+  updated_at?: string
+}
+```
+
+#### Incident Model
+```typescript
+interface Incident {
+  id: number
+  title: string
+  description: string
+  severity: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL'
+  status: 'OPEN' | 'IN_PROGRESS' | 'RESOLVED' | 'ESCALATED'
+  raw_log: string
+  processed_at: string
+  created_at: string
+  node?: Node
+  pattern?: Pattern
+  job_id?: string
+}
+```
+
+---
+
+## 🗄️ Database Schema
+
+### Core Tables
+
+#### Jobs Table
+- **Purpose**: Track log processing jobs
+- **Key Fields**: id, filename, status, progress, timestamps
+- **Indexes**: status, created_at
+
+#### Incidents Table
+- **Purpose**: Store detected incidents
+- **Key Fields**: id, title, severity, status, raw_log
+- **Foreign Keys**: node_id, pattern_id, job_id
+- **Indexes**: severity, status, created_at
+
+#### Nodes Table
+- **Purpose**: OneFS cluster node information
+- **Key Fields**: hostname, ip_address, node_type, version
+- **Indexes**: hostname
+
+#### Patterns Table
+- **Purpose**: Incident detection patterns
+- **Key Fields**: name, regex_pattern, severity_level, category
+- **Indexes**: is_active, category
+
+---
+
+## 🧪 Testing
+
+### Test Structure
+```
+tests/
+├── unit/                    # Unit tests
+│   ├── test_api.py         # API endpoint tests
+│   ├── test_models.py       # Model tests
+│   └── test_services.py    # Service tests
+├── integration/            # Integration tests
+│   ├── test_onefs.py       # OneFS integration
+│   └── test_workflows.py   # End-to-end workflows
+└── conftest.py            # Test configuration
+```
+
+### Running Tests
+```bash
+# Backend tests
+pytest
+
+# With coverage
+pytest --cov=src --cov-report=html
+
+# Frontend tests
+cd frontend && npm test
+
+# Integration tests
+python test_project_functionality.py
+```
+
+---
+
+## 🚀 Deployment
+
+### Production Setup
+```bash
+# Build images
+docker build -t log-intelligence-api:latest -f docker/Dockerfile.api .
+docker build -t log-intelligence-worker:latest -f docker/Dockerfile.worker .
+
+# Deploy
+docker-compose -f docker-compose.yml up -d
+
+# Health check
+curl http://localhost:8000/health
+```
+
+### Monitoring
+- **Health Checks**: `/health` endpoint
+- **Metrics**: Prometheus integration available
+- **Logs**: Structured JSON logging
+- **Error Tracking**: Sentry integration ready
+
+---
+
+## 🔧 Development
+
+### Backend Development
+```bash
+# Install dependencies
+pip install -r requirements.txt
+
+# Database migrations
+alembic upgrade head
+
+# Development server
+uvicorn src.app.main:app --host 0.0.0.0 --port 8000 --reload
+
+# Worker development
+celery -A src.core.celery worker --loglevel=info
+```
+
+### Frontend Development
+```bash
+cd frontend
+
+# Install dependencies
+npm install
+
+# Development server
+npm run dev
+
+# Build for production
+npm run build
+
+# Preview production build
+npm run preview
+```
+
+### Code Quality
+- **Python**: PEP 8 compliance, type hints
+- **TypeScript**: Strict mode, proper interfaces
+- **React**: Functional components, hooks best practices
+- **Testing**: 80%+ coverage requirement
+
+---
+
+## 🔍 OneFS Integration
+
+### Supported Patterns
+The system detects 23+ OneFS-specific patterns:
+
+#### Hardware Issues
+- Disk failures and SMART errors
+- Memory errors and ECC issues
+- Network interface problems
+- Power supply failures
+
+#### Service Issues
+- Isilon service failures
+- Process crashes and restarts
+- Configuration errors
+- License issues
+
+#### Performance Issues
+- High CPU usage
+- Memory pressure
+- Disk space warnings
+- Network bottlenecks
+
+#### Security Events
+- Authentication failures
+- Permission denied errors
+- SSH access attempts
+- Audit log events
+
+#### Cluster Events
+- Quorum changes
+- Node failures
+- Network partitions
+- Upgrade events
+
+### SSH Tunnel Setup
+```bash
+# Create SSH tunnel for OneFS access
+ssh -N -L 0.0.0.0:8080:${ISILON_HOST}:${ISILON_PORT} \
+  -p ${ISILON_SSH_PORT} \
+  -i /path/to/ssh/key \
+  -o StrictHostKeyChecking=accept-new \
+  ${ISILON_USER:-root}@${ISILON_HOST}
+```
+> Never use `StrictHostKeyChecking=no` — it makes the tunnel trivially
+> MITM-able. `accept-new` pins the host key on first connection; pre-seed
+> `known_hosts` (or set ONEFS_HOST_KEY) for fully strict checking.
+
+---
+
+## 🐛 Troubleshooting
+
+### Common Issues
+
+#### Frontend Not Loading
+```bash
+# Check nginx proxy
+docker-compose logs nginx
+
+# Check frontend build
+docker-compose exec frontend npm run build
+
+# Verify API connectivity
+curl http://localhost:8000/health
+```
+
+#### Jobs Not Processing
+```bash
+# Check Celery workers
+docker-compose exec worker celery -A inspect active
+
+# Check Redis queue
+docker-compose exec redis redis-cli llen celery
+
+# Check worker logs
+docker-compose logs worker
+```
+
+#### Database Issues
+```bash
+# Check database connection
+docker-compose exec postgres psql -U postgres -d log_intelligence
+
+# Run migrations
+docker-compose exec api alembic upgrade head
+
+# Check database logs
+docker-compose logs postgres
+```
+
+#### Authentication Problems
+```bash
+# Clear browser cache
+localStorage.clear()
+
+# Check JWT tokens
+curl -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/v1/jobs
+
+# Verify user credentials
+docker-compose exec api python -c "from src.core.auth import verify_user; print(verify_user('admin', 'admin123'))"
+```
+
+---
+
+## 📈 Performance Optimization
+
+### Database
+- Add indexes on frequently queried columns
+- Use connection pooling
+- Optimize slow queries with EXPLAIN ANALYZE
+
+### Redis
+- Use connection pooling
+- Monitor memory usage
+- Set appropriate TTL for cached data
+
+### API
+- Implement response caching
+- Use async/await properly
+- Optimize database queries
+
+### Frontend
+- Use React.memo for expensive components
+- Implement code splitting
+- Optimize bundle size
+
+---
+
+## 🤝 Contributing
+
+### Development Workflow
+1. Fork the repository
+2. Create feature branch
+3. Make changes with tests
+4. Submit pull request
+5. Code review and merge
+
+### Standards
+- **Code Style**: Follow existing patterns
+- **Testing**: Write tests for new features
+- **Documentation**: Update relevant docs
+- **Commits**: Use conventional commit messages
+
+---
+
+## 📞 Support
+
+### Getting Help
+- **Issues**: Create GitHub issue
+- **Questions**: Contact development team
+- **Documentation**: Check this guide first
+- **Examples**: See `examples/` directory
+
+### Resources
+- **API Docs**: http://localhost:8000/docs
+- **OneFS Docs**: Dell EMC documentation
+- **React Docs**: https://react.dev
+- **FastAPI Docs**: https://fastapi.tiangolo.com
+
+---
+
+## 📄 License
+
+MIT License - see LICENSE file for details.
+
+---
+
+**Last Updated**: March 2026
+**Version**: 1.0.0
+**Maintainer**: Development Team

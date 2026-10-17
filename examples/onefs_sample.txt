@@ -1,0 +1,30 @@
+Mar 27 10:15:32 node-01 isilon_d[1234]: [CRITICAL] System temperature exceeds threshold: 85C
+Mar 27 10:16:45 node-01 kernel: [ Hardware Error ] CPU temperature critical
+Mar 27 10:18:22 node-02 smartd[5678]: SMART failure predicted on device /dev/sda
+Mar 27 10:20:11 node-02 isi_pools_d[9012]: ERROR: Storage pool 'data_pool' status: DEGRADED
+Mar 27 10:22:33 node-01 isi_mcp_d[3456]: Cluster quorum lost, reforming cluster
+Mar 27 10:25:17 node-03 nfsd[7890]: NFS request timed out for client 192.168.1.100
+Mar 27 10:27:44 node-01 smbd[2345]: CIFS connection failed for user 'admin'
+Mar 27 10:30:12 node-02 krb5kdc[6789]: Kerberos ticket expired for user 'user1'
+Mar 27 10:32:55 node-01 sssd[8901]: LDAP connection timeout to dc.company.com
+Mar 27 10:35:28 node-03 auditd[1234]: SECURITY: Permission denied for access to /ifs/data/secret
+Mar 27 10:38:01 node-01 psu_monitor[4567]: Power supply PS-1 failure detected
+Mar 27 10:40:33 node-02 isi_job_d[5678]: Backup job 'nightly_backup' failed: Connection timeout
+Mar 27 10:43:07 node-01 isi_snapshot_d[8901]: Snapshot creation failed: Insufficient space
+Mar 27 10:45:42 node-03 isi_upgrade_d[2345]: OneFS upgrade started: version 9.5.0.0
+Mar 27 10:48:15 node-01 networkd[6789]: Interface ext-1 is down
+Mar 27 10:50:58 node-02 isi_mcp_d[9012]: Node node-03 disconnected from cluster
+Mar 27 10:53:21 node-01 isilon_d[3456]: [CRITICAL] Memory usage critical: 98% utilized
+Mar 27 10:55:44 node-03 isi_quota_d[5678]: Quota exceeded for user 'user2' on /ifs/home
+Mar 27 10:58:07 node-02 isi_auth_d[8901]: Authentication failure for user 'admin' from 10.0.0.50
+Mar 27 11:00:30 node-01 isi_mcp_d[1234]: Cluster reform completed successfully
+Mar 27 11:02:53 node-03 smartd[4567]: SMART error: Device /dev/sdb has 5 bad sectors
+Mar 27 11:05:16 node-02 isi_pools_d[7890]: Storage pool 'backup_pool' status: UNAVAILABLE
+Mar 27 11:07:39 node-01 isi_job_d[9012]: Replication job 'dr_sync' failed: Network unreachable
+Mar 27 11:10:02 node-03 isi_snapshot_d[2345]: Snapshot 'daily_snap' deleted successfully
+Mar 27 11:12:25 node-01 isi_upgrade_d[5678]: OneFS upgrade completed successfully
+Mar 27 11:14:48 node-02 networkd[8901]: Interface ext-2 is up
+Mar 27 11:17:11 node-03 isi_mcp_d[1234]: Node node-02 reconnected to cluster
+Mar 27 11:19:34 node-01 isi_auth_d[4567]: LDAP connection restored to dc.company.com
+Mar 27 11:21:57 node-02 nfsd[7890]: NFS service restored
+Mar 27 11:24:20 node-03 smbd[9012]: CIFS service restored

@@ -1,0 +1,171 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: log_intelligence
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # SSH Tunnel Service (from reference pattern)
+  isilon-tunnel:
+    image: docker.io/alpine:3.20
+    container_name: isilon-tunnel
+    restart: unless-stopped
+    environment:
+      MGMT_IP: "${ONEFS_HOST}"  # Set ONEFS_HOST in your .env — never commit a real IP
+      MGMT_PORT: "8080"          # OneFS Platform API port
+      JUMPHOST: "${ONEFS_HOST}"
+      ONEFS_USER: "${ONEFS_USER:-root}"  # SSH user for the OneFS cluster
+      JUMPPORT: "50019"
+      SSH_KEY: "/root/.ssh/id_ed25519"
+    command:
+      - sh
+      - -ec
+      - |
+          apk add --no-cache openssh busybox-extras
+          # Create new key with proper permissions
+          cat /root/.ssh/id_ed25519 > /tmp/id_ed25519
+          chmod 600 /tmp/id_ed25519
+          # SECURITY: host-key checking was StrictHostKeyChecking=no
+          # (trivially MITM-able). accept-new pins the key on first
+          # connection; pre-seed known_hosts from ONEFS_HOST_KEY for
+          # fully strict checking.
+          exec ssh -N \
+            -L 0.0.0.0:8080:${MGMT_IP}:${MGMT_PORT} \
+            -p ${JUMPPORT} \
+            -i /tmp/id_ed25519 \
+            -o StrictHostKeyChecking=accept-new \
+            -o BatchMode=yes \
+            -o ExitOnForwardFailure=yes \
+            -o ServerAliveInterval=60 \
+            -o ServerAliveCountMax=3 \
+            ${ONEFS_USER}@${JUMPHOST}
+    volumes:
+      - type: bind
+        source: 'C:\Users\chana13\.ssh'
+        target: /root/.ssh
+    healthcheck:
+      test: ["CMD-SHELL", "sh -c 'nc -z -w 1 127.0.0.1 8080'"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 5s
+
+  api:
+    image: localhost/log-intelligence-api:latest
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/log_intelligence
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - ISILON_HOST=isilon-tunnel
+      - ISILON_PORT=8080
+      - ISILON_USER=root
+      - ISILON_PASS=a
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./src:/app/src
+      - type: bind
+        source: 'C:\Users\chana13\.ssh'
+        target: /root/.ssh
+    command: uvicorn src.app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  worker:
+    image: localhost/log-intelligence-worker:latest
+    environment:
+      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/log_intelligence
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - ISILON_HOST=isilon-tunnel
+      - ISILON_PORT=8080
+      - ISILON_USER=root
+      - ISILON_PASS=a
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./src:/app/src
+      - type: bind
+        source: 'C:\Users\chana13\.ssh'
+        target: /root/.ssh
+    command: celery -A src.core.celery worker --loglevel=info
+
+  celery-beat:
+    image: localhost/log-intelligence-worker:latest
+    environment:
+      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/log_intelligence
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./src:/app/src
+    command: celery -A src.core.celery beat --loglevel=info
+
+  # Frontend build service
+  frontend:
+    image: node:18-alpine
+    working_dir: /app
+    volumes:
+      - ./frontend:/app
+      - frontend_build:/app/dist
+    command: sh -c "npm install --legacy-peer-deps && npm run build"
+
+  # Nginx reverse proxy
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "8080:80"
+      - "8443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - frontend_build:/usr/share/nginx/html:ro
+      - nginx_logs:/var/log/nginx
+    depends_on:
+      - api
+      - frontend
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  postgres_data:
+  redis_data:
+  frontend_build:
+  nginx_logs:
