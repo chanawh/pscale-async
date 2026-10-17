@@ -11,6 +11,11 @@ from sqlalchemy.orm import Session
 
 from src.core.celery import celery_app
 from src.core.config import settings
+from src.core.storage import (
+    StorageReference,
+    backend_from_settings,
+    stream_to_text_lines,
+)
 from src.db.database import Base, SessionLocal
 from src.models import Incident, Job, JobStatus, Node, Pattern, Severity, Status
 
@@ -24,11 +29,19 @@ def process_log_file(
     job_id: str,
     file_path: Optional[str] = None,
     log_lines: Optional[List[str]] = None,
+    storage_ref: Optional[Dict[str, str]] = None,
     node_hostname: Optional[str] = None,
     description: Optional[str] = None,
 ):
     """
     Process a log file or log lines and extract incidents based on patterns.
+
+    The preferred input is ``storage_ref`` — a content reference
+    (``{"backend", "bucket", "key"}``) that the worker resolves through the
+    configured storage backend. This is the cross-container handoff: the
+    worker never assumes the upload exists on its local filesystem.
+    ``file_path`` (legacy) and ``log_lines`` (stream/cluster ingest) are
+    still accepted.
     """
 
     # Get database session
@@ -57,14 +70,24 @@ def process_log_file(
         job.started_at = datetime.utcnow()
         db.commit()
 
-        # Get log lines
-        if file_path and os.path.exists(file_path):
+        # Get log lines — prefer the object-storage content reference (the
+        # cross-container handoff); fall back to the legacy inputs.
+        if storage_ref is not None:
+            ref = StorageReference.from_dict(storage_ref)
+            backend = backend_from_settings(settings)
+            logger.info(
+                f"Processing job {job_id}: streaming object "
+                f"{ref.bucket}/{ref.key} via {ref.backend} backend"
+            )
+            with backend.open_stream(ref) as stream:
+                lines = stream_to_text_lines(stream)
+        elif file_path and os.path.exists(file_path):
             with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
                 lines = f.readlines()
         elif log_lines:
             lines = log_lines
         else:
-            raise Exception("No file path or log lines provided")
+            raise Exception("No storage reference, file path, or log lines provided")
 
         total_lines = len(lines)
         processed_lines = 0
@@ -173,7 +196,10 @@ def process_log_file(
 
         db.commit()
 
-        # Clean up temporary file
+        # Clean up the legacy local temp file. Objects fetched via a
+        # storage reference are intentionally kept: the stored object is the
+        # durable upload artifact the job record points at (lifecycle/
+        # retention policy is a separate concern).
         if file_path and os.path.exists(file_path):
             os.remove(file_path)
 
@@ -194,7 +220,10 @@ def process_log_file(
             job.completed_at = datetime.utcnow()
             db.commit()
 
-        # Clean up temporary file
+        # Clean up the legacy local temp file. Objects fetched via a
+        # storage reference are intentionally kept: the stored object is the
+        # durable upload artifact the job record points at (lifecycle/
+        # retention policy is a separate concern).
         if file_path and os.path.exists(file_path):
             os.remove(file_path)
 

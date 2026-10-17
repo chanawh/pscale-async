@@ -44,6 +44,24 @@ class Settings(BaseSettings):
     chunk_size: int = 8192
     pattern_library_path: str = "./patterns/"
 
+    # --- Upload object storage (API -> Celery handoff) ---
+    # The API streams multipart uploads into the configured backend and hands
+    # the worker a content reference (backend + bucket + key) — never a local
+    # filesystem path, so the handoff works when the API and worker run in
+    # separate containers with no shared volume.
+    #   "local": plain files under local_upload_dir. Dev, tests, and
+    #            single-host deployments where API and worker share a disk.
+    #   "s3":    any S3-compatible endpoint via boto3 (MinIO in compose,
+    #            AWS S3 in production). Fails fast when the S3_* vars below
+    #            are unset.
+    storage_backend: str = "local"
+    local_upload_dir: str = "./uploads"
+    s3_endpoint_url: Optional[str] = None
+    s3_access_key: Optional[str] = None
+    s3_secret_key: Optional[str] = None
+    s3_bucket: str = "pscale-async-uploads"
+    s3_region: str = "us-east-1"
+
     # OneFS Cluster Configuration — no defaults are committed. Real-cluster
     # features fail fast in OneFSClient when these are unset; set
     # ONEFS_MOCK_MODE=true for local development without a cluster.

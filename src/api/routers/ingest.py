@@ -1,9 +1,8 @@
 import logging
 import json
 from datetime import datetime
-import os
 import re
-import threading
+import tempfile
 import uuid
 from typing import List, Optional
 
@@ -13,6 +12,13 @@ from sqlalchemy.orm import Session
 
 from src.core.celery import celery_app
 from src.core.config import settings
+from src.core.storage import (
+    DETECTION_HEAD_BYTES,
+    STREAM_CHUNK_BYTES,
+    backend_from_settings,
+    build_object_key,
+    stream_to_text_lines,
+)
 from src.db.database import get_db
 from src.api.routers.auth import get_current_user
 from src.models import Job, JobStatus, Node
@@ -172,19 +178,18 @@ async def ingest_log_file(
     """
     Upload a log file for async processing.
 
-    - **file**: Log file to process (max 2GB)
+    The upload is streamed into the configured object-storage backend
+    (``STORAGE_BACKEND``) and the Celery worker receives a content
+    reference (backend + bucket + key) — never a local filesystem path —
+    so the handoff works when the API and the worker run in separate
+    containers with no shared volume.
+
+    - **file**: Log file to process (max settings.max_file_size_mb)
     - **node_hostname**: Optional hostname of the source node
     - **description**: Optional description of the log file
 
     Returns a job ID for tracking processing progress.
     """
-
-    # Validate file size
-    if file.size and file.size > settings.max_file_size_mb * 1024 * 1024:
-        raise HTTPException(
-            status_code=413,
-            detail=f"File too large. Maximum size is {settings.max_file_size_mb}MB",
-        )
 
     # Validate file type
     if not file.filename or not file.filename.endswith((".log", ".txt")):
@@ -193,50 +198,73 @@ async def ingest_log_file(
             detail="Invalid file type. Only .log and .txt files are supported",
         )
 
+    max_bytes = settings.max_file_size_mb * 1024 * 1024
+
     # Generate job ID
     job_id = str(uuid.uuid4())
 
     # Create job record
     job = Job(
-        id=job_id, filename=file.filename, file_size=file.size, status=JobStatus.PENDING
+        id=job_id, filename=file.filename, file_size=0, status=JobStatus.PENDING
     )
-
     db.add(job)
     db.commit()
     db.refresh(job)
 
-    # Save file temporarily
-    upload_dir = os.path.abspath("uploads")
-    os.makedirs(upload_dir, exist_ok=True)
-    file_path = os.path.join(upload_dir, f"{job_id}_{file.filename}")
+    # Fail fast on storage misconfiguration before accepting any bytes.
+    backend = backend_from_settings(settings)
+    object_key = build_object_key(job_id, file.filename)
+    ref = None
 
     try:
-        # Save uploaded file
-        with open(file_path, "wb") as buffer:
-            content = await file.read()
-            buffer.write(content)
+        # Stream the upload into a temp spill file (never the whole file in
+        # RAM) while keeping a small head for format/hostname detection.
+        head = bytearray()
+        bytes_written = 0
+        with tempfile.SpooledTemporaryFile(max_size=1024 * 1024) as spill:
+            while True:
+                chunk = await file.read(STREAM_CHUNK_BYTES)
+                if not chunk:
+                    break
+                bytes_written += len(chunk)
+                if bytes_written > max_bytes:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"File too large. Maximum size is {settings.max_file_size_mb}MB",
+                    )
+                spill.write(chunk)
+                if len(head) < DETECTION_HEAD_BYTES:
+                    head.extend(chunk[: DETECTION_HEAD_BYTES - len(head)])
+            spill.seek(0)
+            ref = backend.put_stream(object_key, spill)
 
-        # Enhanced OneFS detection and metadata extraction
-        log_content = content.decode("utf-8", errors="ignore")
-        detected_onefs = detect_onefs_format(log_content)
+        # Record the content reference on the job — this is what the
+        # worker resolves. No local path ever leaves this process.
+        job.storage_backend = ref.backend
+        job.storage_bucket = ref.bucket
+        job.storage_key = ref.key
+        job.file_size = bytes_written
+        db.commit()
+
+        # Format detection and metadata extraction from the buffered head.
+        head_text = bytes(head).decode("utf-8", errors="ignore")
+        detected_onefs = detect_onefs_format(head_text)
 
         # Extract hostname from log if not provided
         extracted_hostname = None
         if not node_hostname:
-            # Try to extract hostname from first few log lines
-            first_lines = log_content.split("\n")[:10]
-            for line in first_lines:
+            for line in head_text.split("\n")[:10]:
                 extracted_hostname = extract_hostname_from_log(line)
                 if extracted_hostname:
                     break
             node_hostname = extracted_hostname
 
         # Classify node type
-        node_type = classify_node_type(node_hostname or "", log_content)
+        node_type = classify_node_type(node_hostname or "", head_text)
 
         # Enhanced description for OneFS logs
         if detected_onefs and not description:
-            description = f"OneFS /var/log/messages file detected"
+            description = "OneFS /var/log/messages file detected"
         elif detected_onefs:
             description = f"OneFS logs: {description}"
 
@@ -259,10 +287,10 @@ async def ingest_log_file(
                 db.commit()
 
         try:
-            # Queue processing task with enhanced metadata
+            # Queue the task with the content reference — never a local path.
             task = process_log_file.delay(
                 job_id=job_id,
-                file_path=file_path,
+                storage_ref=ref.to_dict(),
                 node_hostname=node_hostname,
                 description=description,
             )
@@ -276,25 +304,19 @@ async def ingest_log_file(
                     "detected_onefs": detected_onefs,
                     "node_hostname": node_hostname,
                     "node_type": node_type,
-                    "file_size": file.size,
+                    "file_size": bytes_written,
+                    "storage_backend": ref.backend,
                 },
             }
         except Exception as celery_error:
-            # Fallback to synchronous processing for demo
+            # Fallback to synchronous processing: stream the object back
+            # from storage and process it in the API process.
             logger.warning(f"Celery failed, falling back to synchronous: {celery_error}")
-            
+
             result = None
-            # Read log lines from file
-            try:
-                with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-                    lines = f.readlines()
-            except FileNotFoundError:
-                logger.error(f"Temporary file not found: {file_path}")
-                # Use the content that was already read earlier
-                lines = content.decode("utf-8", errors="ignore").splitlines()
-                lines = [line + "\n" for line in lines if line.strip()]
-            
-            # Process synchronously (Celery task with bind=True)
+            with backend.open_stream(ref) as stream:
+                lines = stream_to_text_lines(stream)
+
             try:
                 result = process_log_file.run(
                     job_id=job_id,
@@ -302,7 +324,7 @@ async def ingest_log_file(
                     node_hostname=node_hostname,
                     description=description,
                 )
-                
+
                 # Update job status to completed
                 job = db.query(Job).filter(Job.id == job_id).first()
                 if job:
@@ -315,17 +337,15 @@ async def ingest_log_file(
                         "incidents_created": result.get("incidents_created", 0),
                     })
                     db.commit()
-                    
+
             except Exception as proc_error:
                 logger.error(f"Direct processing failed for job {job_id}: {proc_error}")
-                # Even if processing fails, we still created a job, so return it with failed status
                 job = db.query(Job).filter(Job.id == job_id).first()
                 if job:
                     job.status = JobStatus.FAILED
                     job.error_message = str(proc_error)
                     db.commit()
-                # Don't raise - still return the job_id so the test passes
-            
+
             return {
                 "job_id": job_id,
                 "status": "completed" if result else "failed",
@@ -334,21 +354,37 @@ async def ingest_log_file(
                     "detected_onefs": detected_onefs,
                     "node_hostname": node_hostname,
                     "node_type": node_type,
-                    "file_size": file.size,
+                    "file_size": bytes_written,
                     "processing_mode": "synchronous",
                 },
             }
 
+    except HTTPException as http_error:
+        # Client errors (413 too large, ...): fail the job; nothing was
+        # stored yet, so there is no orphaned object to clean up.
+        job = db.query(Job).filter(Job.id == job_id).first()
+        if job:
+            job.status = JobStatus.FAILED
+            job.error_message = str(http_error.detail)
+            db.commit()
+        raise
+
     except Exception as e:
         # Update job status to failed
+        job = db.query(Job).filter(Job.id == job_id).first()
         if job:
             job.status = JobStatus.FAILED
             job.error_message = str(e)
             db.commit()
 
-        # Clean up temporary file
-        if os.path.exists(file_path):
-            os.remove(file_path)
+        # Best-effort cleanup so a failed upload leaves no orphaned object.
+        if ref is not None:
+            try:
+                backend.delete(ref)
+            except Exception as cleanup_error:
+                logger.warning(
+                    f"Failed to clean up stored object {ref.key}: {cleanup_error}"
+                )
 
         raise HTTPException(status_code=500, detail=f"Failed to process file: {str(e)}")
 

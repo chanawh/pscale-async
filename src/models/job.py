@@ -30,6 +30,13 @@ class Job(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
+    # Object-storage handoff: the Celery worker receives this content
+    # reference (backend + bucket + key) — never a local filesystem path.
+    # NULL for stream/cluster jobs, which pass log lines directly.
+    storage_backend = Column(String(32), nullable=True)
+    storage_bucket = Column(String(255), nullable=True)
+    storage_key = Column(String(1024), nullable=True)
+
     # Relationships
     incidents = relationship("Incident", back_populates="job")
 
