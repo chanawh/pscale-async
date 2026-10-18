@@ -12,7 +12,7 @@ from src.db.database import get_db
 from src.api.routers.auth import get_current_user
 
 router = APIRouter(
-    prefix="/api/v1/admin",
+
     tags=["database-admin"],
     dependencies=[Depends(get_current_user)],
 )

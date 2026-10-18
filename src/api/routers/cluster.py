@@ -144,6 +144,8 @@ def get_cluster_status():
             "message": f"Successfully connected to cluster at {settings.onefs_host or settings.cluster_host}",
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Unexpected error in get_cluster_status: {str(e)}")
         raise HTTPException(

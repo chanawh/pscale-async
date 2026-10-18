@@ -53,7 +53,7 @@ app.include_router(incidents_router, prefix="/api/v1", tags=["incidents"])
 app.include_router(jobs_router, prefix="/api/v1", tags=["jobs"])
 app.include_router(patterns_router, prefix="/api/v1", tags=["patterns"])
 app.include_router(nodes_router, prefix="/api/v1", tags=["nodes"])
-app.include_router(admin_router, prefix="/api/v1", tags=["database-admin"])
+app.include_router(admin_router, prefix="/api/v1/admin", tags=["database-admin"])
 
 
 @app.get("/", tags=["health"])
