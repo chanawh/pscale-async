@@ -90,7 +90,7 @@ jobs:
         run: pip install --require-hashes -r requirements.txt
 
       - name: Install test deps
-        run: pip install pytest testcontainers
+        run: pip install pytest pytest-cov testcontainers
 
       - name: DB-backed unit tests
         env:
