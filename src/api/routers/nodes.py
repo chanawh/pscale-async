@@ -92,6 +92,13 @@ def get_nodes(
     }
 
 
+@router.get("/nodes/types/list")
+def get_node_types(db: Session = Depends(get_db)):
+    """Get all unique node types."""
+    types = db.query(Node.node_type).distinct().all()
+    return [t[0] for t in types if t[0]]
+
+
 @router.get("/nodes/{node_id}", response_model=NodeResponse)
 def get_node(node_id: int, db: Session = Depends(get_db)):
     """Get a specific node by ID."""
@@ -277,10 +284,3 @@ def delete_node(node_id: int, db: Session = Depends(get_db)):
     db.commit()
 
     return {"message": "Node deleted successfully"}
-
-
-@router.get("/nodes/types/list")
-def get_node_types(db: Session = Depends(get_db)):
-    """Get all unique node types."""
-    types = db.query(Node.node_type).distinct().all()
-    return [t[0] for t in types if t[0]]

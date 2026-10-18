@@ -108,8 +108,8 @@ services:
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
       - ISILON_HOST=isilon-tunnel
       - ISILON_PORT=8080
-      - ISILON_USER=root
-      - ISILON_PASS=
+      - ISILON_USER=${ISILON_USER:-root}
+      - ISILON_PASS=${ISILON_PASS:-}
       - SECRET_KEY=change-me-in-production
       # Upload object storage (API -> Celery handoff)
       - STORAGE_BACKEND=s3
@@ -143,8 +143,8 @@ services:
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
       - ISILON_HOST=isilon-tunnel
       - ISILON_PORT=8080
-      - ISILON_USER=root
-      - ISILON_PASS=
+      - ISILON_USER=${ISILON_USER:-root}
+      - ISILON_PASS=${ISILON_PASS:-}
       - SECRET_KEY=change-me-in-production
       # Upload object storage (API -> Celery handoff)
       - STORAGE_BACKEND=s3
@@ -178,8 +178,8 @@ services:
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
       - ISILON_HOST=isilon-tunnel
       - ISILON_PORT=8080
-      - ISILON_USER=root
-      - ISILON_PASS=
+      - ISILON_USER=${ISILON_USER:-root}
+      - ISILON_PASS=${ISILON_PASS:-}
       - SECRET_KEY=change-me-in-production
     depends_on:
       postgres:

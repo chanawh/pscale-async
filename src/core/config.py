@@ -20,6 +20,12 @@ class Settings(BaseSettings):
     # Database
     database_url: str = "postgresql://postgres:postgres@postgres:5432/log_intelligence"
 
+    # Connection pool (Postgres only -- sqlite keeps a single shared
+    # connection via StaticPool for dev/test). Tune for the number of
+    # API workers x threads plus Celery worker concurrency.
+    database_pool_size: int = 5
+    database_max_overflow: int = 10
+
     # Redis
     redis_url: str = "redis://redis:6379/0"
 
