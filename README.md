@@ -1,7 +1,6 @@
 # Async Log Intelligence API
 
-[![CI](https://github.com/chana13/async-log-intelligence-api/workflows/CI/badge.svg)](https://github.com/chana13/async-log-intelligence-api/actions)
-[![Coverage](https://codecov.io/gh/chana13/async-log-intelligence-api/branch/main/graph/badge.svg)](https://codecov.io/gh/chana13/async-log-intelligence-api)
+[![CI](https://github.com/chanawh/pscale-async/actions/workflows/ci.yml/badge.svg)](https://github.com/chanawh/pscale-async/actions)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.11+-blue.svg)](https://python.org)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.104+-00a393.svg)](https://fastapi.tiangolo.com)
@@ -39,7 +38,7 @@ The **Async Log Intelligence API** is a production-ready REST API service design
 
 ### What Makes It Special
 
-- **🚀 Asynchronous Processing**: Celery workers handle large log files (2GB+) without blocking the API
+- **🚀 Asynchronous Processing**: uploads stream to object storage (413 enforced at the 2GB limit, never whole-file-in-RAM) and processing fans out to chunked Celery tasks; cluster ingest validates, enqueues, and returns 202 -- request handlers never block
 - **🔍 OneFS-Specific Patterns**: 23 built-in patterns covering hardware, network, security, and cluster issues
 - **🔐 Secure SSH Integration**: Direct connectivity to OneFS clusters via SSH tunnels
 - **📊 Real-Time Dashboard**: React + TypeScript frontend with live job progress tracking
@@ -817,7 +816,7 @@ podman-compose -f podman-compose.yml up -d
 
 ```bash
 # 1. Clone repository
-git clone https://github.com/chana13/async-log-intelligence-api.git
+git clone https://github.com/chanawh/pscale-async.git
 cd async-log-intelligence-api
 
 # 2. Build and start
@@ -886,7 +885,7 @@ podman build -t localhost/log-intelligence-api:latest -f Dockerfile .
 
 ```bash
 # 1. Clone repository
-git clone https://github.com/chana13/async-log-intelligence-api.git
+git clone https://github.com/chanawh/pscale-async.git
 cd async-log-intelligence-api
 
 # 2. Configure environment
@@ -987,7 +986,7 @@ We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) f
 
 ```bash
 # 1. Clone repo
-git clone https://github.com/chana13/async-log-intelligence-api.git
+git clone https://github.com/chanawh/pscale-async.git
 
 # 2. Create virtual environment
 python -m venv venv
@@ -1036,8 +1035,8 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## 📞 Support
 
-- **Issues**: [GitHub Issues](https://github.com/chana13/async-log-intelligence-api/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/chana13/async-log-intelligence-api/discussions)
+- **Issues**: [GitHub Issues](https://github.com/chanawh/pscale-async/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/chanawh/pscale-async/discussions)
 - **Email**: chana.miller@example.com
 
 ---

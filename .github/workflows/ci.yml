@@ -1,0 +1,107 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    # Version tags run CI too. The sibling pscale-exporter repo was bitten
+    # by a missing `tags:` trigger: release tags never ran CI, so the
+    # v1.2.0/v2.0.0/v3.0.0 Docker images were never published while the
+    # release notes claimed they were. Never silently skip CI on a tag.
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Compile check (all Python sources)
+        run: python -m compileall -q src tests alembic scripts
+
+      - name: Install dependencies (hash-pinned)
+        run: pip install --require-hashes -r requirements.txt
+
+      - name: Install pytest
+        run: pip install pytest
+
+      - name: Pure unit tests (no Docker, no database)
+        # These seven suites are stdlib-only plus pytest: the AST guard,
+        # storage backends, chunking math, regex engine, event bus,
+        # fingerprint dedup, and the mocked OneFS client. tests/conftest.py
+        # keeps its Docker Postgres fixtures opt-in (no autouse), so they
+        # run on a plain runner.
+        # DB-backed suites (test_api, test_ingestion, admin/cluster router
+        # tests) need live Postgres+Redis and run in the integration job.
+        env:
+          ADMIN_USERNAME: ci-test-admin
+          # bcrypt("admin123") -- test-only bootstrap identity so the app
+          # module imports under pytest (it fail-fasts without it).
+          ADMIN_PASSWORD_HASH: $2b$12$X.m9BbKu7XC9SABo6YiDqOF4lxzqLFkja5AqjBnmL9RuWIc7Ocf8a
+          STORAGE_BACKEND: local
+          EVENT_BUS: memory
+        run: |
+          pytest -v \
+            tests/unit/test_no_decorative_async.py \
+            tests/unit/test_storage.py \
+            tests/unit/test_chunking.py \
+            tests/unit/test_matcher.py \
+            tests/unit/test_events.py \
+            tests/unit/test_dedup.py \
+            tests/unit/test_onefs_client.py
+
+  integration:
+    runs-on: ubuntu-latest
+    needs: build
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: log_intelligence_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies (hash-pinned)
+        run: pip install --require-hashes -r requirements.txt
+
+      - name: Install test deps
+        run: pip install pytest testcontainers
+
+      - name: DB-backed unit tests
+        env:
+          ADMIN_USERNAME: ci-test-admin
+          ADMIN_PASSWORD_HASH: $2b$12$X.m9BbKu7XC9SABo6YiDqOF4lxzqLFkja5AqjBnmL9RuWIc7Ocf8a
+          STORAGE_BACKEND: local
+          EVENT_BUS: memory
+        run: |
+          pytest -v \
+            tests/unit/test_admin_router.py \
+            tests/unit/test_cluster_router.py \
+            tests/unit/test_models.py \
+            tests/unit/test_patterns.py \
+            tests/unit/test_workers.py

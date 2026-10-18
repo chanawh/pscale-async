@@ -13,7 +13,6 @@ os.environ.setdefault(
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-from testcontainers.postgres import PostgresContainer
 
 from src.core.config import settings
 from src.db.database import Base, get_db
@@ -21,7 +20,14 @@ from src.db.database import Base, get_db
 
 @pytest.fixture(scope="session")
 def postgres_container():
-    """Start PostgreSQL container for tests"""
+    """Start PostgreSQL container for tests.
+
+    testcontainers is imported lazily so pure unit tests (which never
+    request this fixture) can run without the package -- and without
+    Docker -- installed.
+    """
+    from testcontainers.postgres import PostgresContainer
+
     with PostgresContainer("postgres:15") as postgres:
         yield postgres
 
@@ -32,9 +38,16 @@ def test_db_url(postgres_container):
     return postgres_container.get_connection_url()
 
 
-@pytest.fixture(scope="session", autouse=True)
+@pytest.fixture(scope="session")
 def configure_test_database(test_db_url):
-    """Configure all database connections to use test database"""
+    """Configure all database connections to use test database.
+
+    NOT autouse: only tests that request a DB fixture (test_engine and
+    everything built on it) trigger the Docker Postgres container.
+    Pure unit tests (matcher, chunking, storage, events, dedup, AST
+    guards) run with no Docker and no database at all -- this is what
+    lets CI run them on a plain runner.
+    """
     import os
     # Set environment variable so worker uses test database
     os.environ["DATABASE_URL"] = test_db_url
@@ -45,8 +58,12 @@ def configure_test_database(test_db_url):
 
 
 @pytest.fixture(scope="session")
-def test_engine(test_db_url):
-    """Create test database engine and clear stale data"""
+def test_engine(test_db_url, configure_test_database):
+    """Create test database engine and clear stale data.
+
+    Explicitly depends on configure_test_database so any test using a
+    DB fixture gets the Docker container + settings pointed at it.
+    """
     # Ensure we use the test database URL
     import os
     os.environ["DATABASE_URL"] = test_db_url
@@ -78,7 +95,11 @@ def test_engine(test_db_url):
 
 @pytest.fixture
 def test_db_session(test_engine):
-    """Create test database session"""
+    """Create test database session.
+
+    Truncates all tables on teardown (replaces the old autouse
+    cleanup_tables fixture, which forced Docker on every test).
+    """
     TestingSessionLocal = sessionmaker(
         autocommit=False, autoflush=False, bind=test_engine
     )
@@ -87,21 +108,14 @@ def test_db_session(test_engine):
         yield session
     finally:
         session.close()
-
-
-@pytest.fixture(autouse=True)
-def cleanup_tables(test_engine):
-    """Clean up all tables after each test function"""
-    yield
-    # Cleanup after test
-    from sqlalchemy import text
-    with test_engine.connect() as conn:
-        conn.execute(text("TRUNCATE TABLE incident_activities CASCADE"))
-        conn.execute(text("TRUNCATE TABLE incidents CASCADE"))
-        conn.execute(text("TRUNCATE TABLE jobs CASCADE"))
-        conn.execute(text("TRUNCATE TABLE patterns CASCADE"))
-        conn.execute(text("TRUNCATE TABLE nodes CASCADE"))
-        conn.commit()
+        from sqlalchemy import text
+        with test_engine.connect() as conn:
+            conn.execute(text("TRUNCATE TABLE incident_activities CASCADE"))
+            conn.execute(text("TRUNCATE TABLE incidents CASCADE"))
+            conn.execute(text("TRUNCATE TABLE jobs CASCADE"))
+            conn.execute(text("TRUNCATE TABLE patterns CASCADE"))
+            conn.execute(text("TRUNCATE TABLE nodes CASCADE"))
+            conn.commit()
 
 
 @pytest.fixture

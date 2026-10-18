@@ -25,8 +25,12 @@ client = TestClient(app)
 
 
 @pytest.fixture(scope="function")
-def db_session():
-    """Create a fresh database session for each test"""
+def db_session(configure_test_database):
+    """Create a fresh database session for each test.
+
+    Depends on configure_test_database so the app engine points at the
+    test Postgres container (this fixture uses the app's own engine).
+    """
     Base.metadata.create_all(bind=engine)
     db = SessionLocal()
     try:
