@@ -14,11 +14,12 @@ class TestOneFSClient:
         assert client.mock_mode is True
         assert client.mock_server is not None
 
-    @patch.dict('os.environ', {'ONEFS_MOCK_MODE': 'false'})
+    @patch.dict('os.environ', {'ONEFS_MOCK_MODE': 'false',
+                               'ONEFS_HOST': '203.0.113.10',
+                               'ONEFS_USER': 'testuser',
+                               'ONEFS_PASS': 'testpass'})
     @patch('src.onefs.client.socket.socket')
     @patch('src.onefs.client.paramiko.SSHClient')
-    @patch.object(onefs_settings, 'onefs_host', '203.0.113.10')
-    @patch.object(onefs_settings, 'onefs_user', 'testuser')
     def test_real_mode_initialization(self, mock_ssh, mock_socket):
         """Test client initializes in real mode with env-configured host/user"""
         mock_sock = Mock()

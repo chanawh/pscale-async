@@ -31,7 +31,7 @@ from typing import BinaryIO, ContextManager, Dict, Iterator, Optional
 
 _VALID_BACKENDS = ("local", "s3")
 
-_SAFE_KEY_CHARS = re.compile(r"[^A-Za-z0-9._-]+")
+_SAFE_KEY_CHARS = re.compile(r"[^A-Za-z0-9._-]")
 
 # How much of an upload the API keeps in memory for format detection while
 # the full stream goes to the backend. Detection only needs the head.
@@ -280,10 +280,11 @@ class S3StorageBackend(StorageBackend):
 def sanitize_filename(filename: Optional[str]) -> str:
     """Make an uploader-supplied filename safe for use in an object key.
 
-    Strips directories (path traversal) and replaces anything outside
-    ``[A-Za-z0-9._-]`` so the key is safe for both the local backend and S3.
+    Strips directories (path traversal, both ``/`` and Windows ``\\`` separators)
+    and replaces anything outside ``[A-Za-z0-9._-]`` 1:1 with ``_`` so the key
+    is safe for both the local backend and S3.
     """
-    base = os.path.basename(filename or "")
+    base = os.path.basename((filename or "").replace("\\", "/"))
     base = _SAFE_KEY_CHARS.sub("_", base).strip("._")
     return base or "upload.log"
 

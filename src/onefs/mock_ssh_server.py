@@ -17,7 +17,7 @@ class MockOneFSServer:
     
     def __init__(self):
         self.cluster_info = {
-            "name": "Mock-Cluster",
+            "name": "Demo OneFS Cluster",
             "version": "OneFS 9.5.0.0",
             "nodes": 3,
             "status": "healthy"
@@ -75,6 +75,16 @@ Protection: +2:1"""
             else:
                 return "Mock-Cluster"
                 
+        elif command.startswith("ls "):
+            return """messages
+kern.log
+syslog
+auth.log
+daemon.log"""
+        elif command.startswith("cat "):
+            return """Mar 27 10:15:32 mock-node-01 isi_mds_d[1234]: [info] MDS service started
+Mar 27 10:15:33 mock-node-01 isi_for_array[5678]: node mock-node-01 online
+Mar 27 10:16:01 mock-node-02 smartd[9012]: Device: /dev/da0, SMART Usage Attribute: 194 Temperature_Celsius changed"""
         elif "uptime" in command:
             return " 14:32:45 up 2 days, 14:32,  1 user,  load average: 0.15, 0.25, 0.20"
             

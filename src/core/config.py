@@ -18,7 +18,7 @@ def _default_secret_key() -> str:
 
 class Settings(BaseSettings):
     # Database
-    database_url: str = "postgresql://postgres:postgres@postgres:5432/log_intelligence"
+    database_url: str = "postgresql+psycopg2://postgres:postgres@postgres:5432/log_intelligence"
 
     # Connection pool (Postgres only -- sqlite keeps a single shared
     # connection via StaticPool for dev/test). Tune for the number of
