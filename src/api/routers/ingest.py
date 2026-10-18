@@ -226,6 +226,13 @@ def ingest_log_file(
                 node_hostname=node_hostname,
                 description=description,
             )
+            # Track the entrypoint task id for cancellation. Append (after
+            # refresh), never overwrite: in eager/dev mode the pipeline
+            # already ran synchronously inside .delay() and fanout may
+            # have recorded the chunk/chord ids first.
+            db.refresh(job)
+            job.celery_task_ids = (job.celery_task_ids or []) + [task.id]
+            db.commit()
 
             return {
                 "job_id": job_id,
@@ -408,6 +415,11 @@ def ingest_log_stream(
                 node_hostname=node_hostname,
                 description=description,
             )
+            # Track the entrypoint task id for cancellation (append after
+            # refresh -- see the upload handler above for why).
+            db.refresh(job)
+            job.celery_task_ids = (job.celery_task_ids or []) + [task.id]
+            db.commit()
 
             return {
                 "job_id": job_id,
@@ -572,6 +584,11 @@ def ingest_cluster_logs(
             description=description,
             cluster_name=target["name"],
         )
+        # Track the entrypoint task id for cancellation (append after
+        # refresh -- see the upload handler above for why).
+        db.refresh(job)
+        job.celery_task_ids = (job.celery_task_ids or []) + [task.id]
+        db.commit()
     except Exception as e:
         # Broker unreachable: don't fail open by doing the work inline —
         # mark the job failed so the state is honest.

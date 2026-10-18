@@ -156,6 +156,16 @@ def fanout_process_log(self, job_id, storage_ref, node_hostname=None, descriptio
     db = SessionLocal()
     try:
         job, db = _get_job_or_raise(db, job_id)
+
+        # Cancellation race: the cancel endpoint may have run between the
+        # API dispatch and this task's execution. Never fan out a chord
+        # for a job the user already cancelled.
+        if job.status == JobStatus.CANCELLED:
+            logger.info(
+                f"Job {job_id}: fan-out skipped, job already cancelled"
+            )
+            return {"status": "cancelled", "job_id": job_id}
+
         ref = StorageReference.from_dict(storage_ref)
         backend = backend_from_settings(settings)
 
@@ -222,7 +232,36 @@ def fanout_process_log(self, job_id, storage_ref, node_hostname=None, descriptio
             for i, (start, end) in enumerate(ranges)
         )
         # The chord body is invoked as finalize_job(group_results, job_id).
-        chord(header, finalize_job.s(job_id=job_id)).apply_async()
+        chord_result = chord(header, finalize_job.s(job_id=job_id)).apply_async()
+
+        # Record every task id the pipeline owns so the cancel endpoint
+        # can revoke them: this fan-out task's own id, each chunk task id,
+        # and the chord id. Refresh-then-append: the API handler recorded
+        # the entrypoint id, and in eager mode it may have run (and
+        # committed) after this task already appended -- never clobber.
+        # Defensive: chord_result.parent is the GroupResult in normal
+        # operation, but eager-mode result shapes vary by Celery version.
+        try:
+            new_ids = [self.request.id]
+            parent = chord_result.parent
+            if parent is not None:
+                for r in parent.results or []:
+                    rid = getattr(r, "id", None)
+                    if rid:
+                        new_ids.append(rid)
+            if getattr(chord_result, "id", None):
+                new_ids.append(chord_result.id)
+            db.refresh(job)
+            job.celery_task_ids = (job.celery_task_ids or []) + [
+                i for i in new_ids if i not in (job.celery_task_ids or [])
+            ]
+            db.commit()
+        except Exception as track_error:
+            # Tracking is auxiliary: a failure here must never break the
+            # pipeline itself. The job simply isn't revocable by id.
+            logger.warning(
+                f"Job {job_id}: could not record chord task ids: {track_error}"
+            )
 
         logger.info(
             f"Job {job_id}: fanned out into {len(ranges)} chunks "
@@ -379,6 +418,25 @@ def process_chunk(
     """
     db = SessionLocal()
     try:
+        # Cooperative cancellation: a chunk picked up just as the revoke
+        # broadcast lands (or re-queued after one) must not start work on
+        # a cancelled job. Runs before the delete-then-recreate below, so
+        # incidents committed by finished chunks are left alone -- cancel
+        # means "stop", not "roll back".
+        job = db.query(Job).filter(Job.id == job_id).first()
+        if job is not None and job.status == JobStatus.CANCELLED:
+            logger.info(
+                f"Job {job_id} chunk {chunk_index}: job cancelled; skipping"
+            )
+            return {
+                "chunk_index": chunk_index,
+                "status": "cancelled",
+                "lines": 0,
+                "incidents_created": 0,
+                "dedup_skipped": 0,
+                "patterns_matched": [],
+            }
+
         # --- Retry safety, layer 1: delete-then-recreate on
         # (job_id, chunk_index). Guards the at-least-once window (commit
         # landed, ack lost → redelivery) AND the changed-output case (see
@@ -624,6 +682,20 @@ def finalize_job(self, chunk_results, job_id):
     db = SessionLocal()
     try:
         job, db = _get_job_or_raise(db, job_id)
+
+        # Cancellation race: the chord may fire after the user cancelled
+        # (chunks already finished, finalizer already queued, or revoked
+        # tasks whose results still arrived). A cancelled job is terminal:
+        # never overwrite CANCELLED with COMPLETED/FAILED and never emit
+        # a completion event for it. Incidents written by finished chunks
+        # stay -- cancel means "stop", not "roll back".
+        if job.status == JobStatus.CANCELLED:
+            logger.info(
+                f"Job {job_id}: chord finalizer ran after cancellation; "
+                "leaving CANCELLED state untouched"
+            )
+            return {"job_id": job_id, "status": "cancelled"}
+
         results = list(chunk_results or [])
         failed = [
             r for r in results if isinstance(r, dict) and r.get("status") == "failed"
@@ -858,6 +930,25 @@ def process_log_file(
 
             # Update progress
             if processed_lines % 100 == 0 or processed_lines == total_lines:
+                # Cooperative cancellation for the legacy path: revoke with
+                # terminate=True SIGTERMs this task, but a task that
+                # started before the broadcast still needs to stop itself.
+                # The checkpoint commit expires attributes, so this
+                # re-reads the row -- a CANCELLED landing mid-loop is seen
+                # at the next checkpoint (<=100 lines later).
+                db.refresh(job)
+                if job.status == JobStatus.CANCELLED:
+                    logger.info(
+                        f"Job {job_id}: cancelled during legacy processing; "
+                        f"stopping after {processed_lines} lines"
+                    )
+                    return {
+                        "status": "cancelled",
+                        "job_id": job_id,
+                        "processed_lines": processed_lines,
+                        "incidents_created": incidents_created,
+                    }
+
                 progress = int((processed_lines / total_lines) * 100)
                 job.progress = progress
 

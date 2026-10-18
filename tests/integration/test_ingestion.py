@@ -178,22 +178,77 @@ class TestJobManagement:
         assert response.status_code == 404
 
     def test_cancel_job(self, client, test_db_session):
-        """Test cancelling a pending job."""
+        """Test cancelling a processing job revokes its Celery tasks."""
         job = Job(
             id="test-job-cancel",
             filename="cancel-test.log",
-            status=JobStatus.PENDING,
-            progress=0,
+            status=JobStatus.PROCESSING,
+            progress=42,
+            celery_task_ids=["celery-task-1", "celery-task-2"],
         )
         test_db_session.add(job)
         test_db_session.commit()
 
-        response = client.post(f"/api/v1/jobs/{job.id}/cancel")
-        assert response.status_code == 200
+        with patch("src.api.routers.jobs.celery_app") as mock_celery:
+            response = client.post(f"/api/v1/jobs/{job.id}/cancel")
 
-        # Verify job was cancelled
+        assert response.status_code == 200
+        mock_celery.control.revoke.assert_called_once_with(
+            ["celery-task-1", "celery-task-2"], terminate=True
+        )
+
+        # Verify job was cancelled (CANCELLED, not FAILED)
         test_db_session.refresh(job)
-        assert job.status == JobStatus.FAILED
+        assert job.status == JobStatus.CANCELLED
+        assert job.completed_at is not None
+        data = response.json()
+        assert data["status"] == "CANCELLED"
+        assert data["revoked_task_ids"] == ["celery-task-1", "celery-task-2"]
+
+    def test_cancel_terminal_job_returns_409(self, client, test_db_session):
+        """Cancelling a terminal job is a no-op error, never silent success."""
+        for status in (JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED):
+            job = Job(
+                id=f"test-job-cancel-409-{status.value}",
+                filename="terminal-test.log",
+                status=status,
+                celery_task_ids=["task-x"],
+            )
+            test_db_session.add(job)
+            test_db_session.commit()
+
+            with patch("src.api.routers.jobs.celery_app") as mock_celery:
+                response = client.post(f"/api/v1/jobs/{job.id}/cancel")
+
+            assert response.status_code == 409
+            mock_celery.control.revoke.assert_not_called()
+            test_db_session.refresh(job)
+            assert job.status == status  # untouched
+
+    def test_cancel_nonexistent_job_returns_404(self, client):
+        """Test cancelling a job that doesn't exist."""
+        response = client.post("/api/v1/jobs/nonexistent-id/cancel")
+        assert response.status_code == 404
+
+    def test_cancel_job_without_task_ids_returns_422(self, client, test_db_session):
+        """Jobs created before task tracking have nothing to revoke --
+        the endpoint says so honestly instead of pretending."""
+        job = Job(
+            id="test-job-cancel-422",
+            filename="legacy-test.log",
+            status=JobStatus.PROCESSING,
+            celery_task_ids=None,
+        )
+        test_db_session.add(job)
+        test_db_session.commit()
+
+        with patch("src.api.routers.jobs.celery_app") as mock_celery:
+            response = client.post(f"/api/v1/jobs/{job.id}/cancel")
+
+        assert response.status_code == 422
+        mock_celery.control.revoke.assert_not_called()
+        test_db_session.refresh(job)
+        assert job.status == JobStatus.PROCESSING  # untouched
 
 
 class TestIncidentEndpoints:

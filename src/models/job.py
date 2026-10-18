@@ -1,6 +1,6 @@
 from enum import Enum as PyEnum
 
-from sqlalchemy import Column, DateTime, Enum, Integer, String, Text
+from sqlalchemy import JSON, Column, DateTime, Enum, Integer, String, Text
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 
@@ -12,6 +12,7 @@ class JobStatus(PyEnum):
     PROCESSING = "PROCESSING"
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
 
 
 class Job(Base):
@@ -51,6 +52,16 @@ class Job(Base):
     # created before multi-cluster support -- both are treated as the
     # default cluster.
     cluster_name = Column(String(255), nullable=True, index=True)
+
+    # Cancellation support: every Celery task id dispatched for this job,
+    # recorded at each stage so POST /jobs/{id}/cancel can revoke them.
+    # The API handlers store the entrypoint task id
+    # (process_log_file / ingest_cluster_log); fanout_process_log appends
+    # its own id plus every chunk task id and the chord id. JSON list of
+    # strings. NULL for jobs created before task tracking -- those are
+    # not revocable and the cancel endpoint says so honestly (422)
+    # instead of pretending.
+    celery_task_ids = Column(JSON, nullable=True)
 
     # Relationships
     incidents = relationship("Incident", back_populates="job")

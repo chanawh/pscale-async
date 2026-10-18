@@ -327,3 +327,15 @@ def emit_job_failed(
             "summary": summary,
         },
     )
+
+
+def emit_job_cancelled(
+    *, job_id: str, cluster_name: Optional[str] = None
+) -> bool:
+    """A running job was cancelled by the user: its Celery tasks were
+    revoked and the job row moved to CANCELLED. Emitted commit-then-
+    publish like every other terminal transition."""
+    return publish_event(
+        job_channel(job_id, cluster_name),
+        {"type": "job.cancelled", "job_id": job_id},
+    )
