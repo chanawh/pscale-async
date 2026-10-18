@@ -47,6 +47,17 @@ class Incident(Base):
     # matches NULL, so legacy incidents are never touched by chunk retries.
     chunk_index = Column(Integer, nullable=True, index=True)
 
+    # Content fingerprint: sha256(pattern_id, node_id, stripped log line),
+    # 64 hex chars — see src/workers/fingerprint.py for the composition and
+    # the scope rationale. UNIQUE across the table: the effective dedup
+    # scope is (pattern, node, line), global across jobs, so re-ingesting
+    # the same file as a new job inserts zero new incidents while the same
+    # line on a different node still creates a distinct incident. NULL for
+    # rows written before this column existed; NULLs never participate in
+    # dedup (NULL != NULL under unique indexes on PostgreSQL and SQLite).
+    # New code always sets it.
+    fingerprint = Column(String(64), nullable=True, unique=True)
+
     # Relationships
     node = relationship("Node", back_populates="incidents")
     pattern = relationship("Pattern", back_populates="incidents")

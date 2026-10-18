@@ -31,8 +31,18 @@ Design notes (the trade-offs, stated plainly):
   cleanup — the single commit at the end of the chunk rolls back with
   the transaction, leaving nothing behind. Incidents from the legacy
   monolithic path have ``chunk_index IS NULL`` and never match the
-  delete predicate. The full content-fingerprint dedup is a separately
-  queued change.
+  delete predicate.
+
+* Idempotency is a second, complementary layer: a content fingerprint
+  (``sha256(pattern_id, node_id, line)``, see
+  ``src/workers/fingerprint.py``) with a UNIQUE constraint. The delete
+  runs FIRST because it also covers the changed-output case — if the
+  pattern library was edited between attempts, the same line may now
+  match a different pattern (different fingerprint), and only the delete
+  wipes the stale output. The fingerprint then handles what the delete
+  cannot: cross-job idempotency (re-ingesting the same file as a new
+  job inserts zero new incidents). Two layers, each covering what the
+  other cannot.
 
 * Partial failure: a chunk that exhausts its retries returns a failure
   *result dict* instead of raising, so the chord always fires and
@@ -64,6 +74,7 @@ from typing import Any, Dict, List, Optional
 
 from celery import chord, current_task, group
 from sqlalchemy import create_engine, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from src.core.celery import celery_app
@@ -82,6 +93,7 @@ from src.core.storage import (
 from src.db.database import Base, SessionLocal
 from src.models import Incident, Job, JobStatus, Node, Pattern, Severity, Status
 from src.workers.chunking import compute_chunk_ranges, count_stream_lines
+from src.workers.fingerprint import compute_fingerprint
 from src.workers.matcher import compile_matcher, match_line
 
 # Setup logging
@@ -251,9 +263,11 @@ def process_chunk(
     """
     db = SessionLocal()
     try:
-        # --- Retry safety: delete-then-recreate, keyed on (job_id, chunk_index).
-        # Guards the at-least-once window (commit landed, ack lost →
-        # redelivery). See the module docstring for the full rationale.
+        # --- Retry safety, layer 1: delete-then-recreate on
+        # (job_id, chunk_index). Guards the at-least-once window (commit
+        # landed, ack lost → redelivery) AND the changed-output case (see
+        # module docstring). Runs BEFORE the fingerprint filter below so a
+        # retry's own stale rows can never self-dedup.
         db.query(Incident).filter(
             Incident.job_id == job_id,
             Incident.chunk_index == chunk_index,
@@ -277,11 +291,14 @@ def process_chunk(
                 f"{matcher.skipped}"
             )
 
-        incidents_created = 0
         lines_in_slice = 0
-        matched_patterns = set()
-        # (incident, pattern_name) pairs for event emission after commit.
-        created_incidents = []
+        # Candidate incident column-mappings in match order, plus the
+        # pattern name each came from (for events/summary). Fingerprints
+        # are computed here; the dedup filter + bulk insert happen after
+        # the streaming pass: one SELECT and one INSERT per chunk.
+        # "pattern_name" is metadata, not an Incident column — it is
+        # stripped before insert.
+        candidates = []
 
         with backend.open_stream(ref) as stream:
             text = io.TextIOWrapper(stream, encoding="utf-8", errors="ignore")
@@ -301,44 +318,115 @@ def process_chunk(
                 # warning (see compile_matcher).
                 winner = match_line(matcher, line)
                 if winner is not None:
-                    # Create incident
-                    incident = Incident(
-                        title=f"Pattern Match: {winner.name}",
-                        description=winner.description
-                        or f"Log line matched pattern: {winner.name}",
-                        severity=map_severity(winner.severity_level),
-                        status=Status.OPEN,
-                        raw_log=line,
-                        node_id=node_id,
-                        pattern_id=winner.id,
-                        job_id=job_id,
-                        chunk_index=chunk_index,
+                    candidates.append(
+                        {
+                            "title": f"Pattern Match: {winner.name}",
+                            "description": winner.description
+                            or f"Log line matched pattern: {winner.name}",
+                            "severity": map_severity(winner.severity_level),
+                            "status": Status.OPEN,
+                            "raw_log": line,
+                            "node_id": node_id,
+                            "pattern_id": winner.id,
+                            "job_id": job_id,
+                            "chunk_index": chunk_index,
+                            "fingerprint": compute_fingerprint(
+                                winner.id, node_id, line
+                            ),
+                            "pattern_name": winner.name,
+                        }
                     )
-                    db.add(incident)
-                    created_incidents.append((incident, winner.name))
-                    incidents_created += 1
-                    matched_patterns.add(winner.name)
 
-        # Flush first so ids are assigned without triggering N refresh
-        # SELECTs after commit expiry; capture the event payloads now, then
-        # publish only after the commit lands, so events never describe
-        # rolled-back rows. Publishing is best-effort (see events.py).
-        db.flush()
-        pending_events = [
-            {
-                "incident_id": inc.id,
-                "pattern_id": inc.pattern_id,
-                "pattern_name": name,
-                "severity": inc.severity.value,
+        # --- Idempotency, layer 2: fingerprint dedup + bulk insert.
+        # Intra-chunk first (the same line twice in one slice), then
+        # against the table. SELECT-then-INSERT is portable across
+        # PostgreSQL and SQLite (no ON CONFLICT dialect games); the UNIQUE
+        # constraint on fingerprint is the backstop, and the savepoint
+        # retry below handles the concurrent-chunk race — duplicate lines
+        # landing in different slices of the same file.
+        seen = set()
+        unique_candidates = []
+        for cand in candidates:
+            if cand["fingerprint"] not in seen:
+                seen.add(cand["fingerprint"])
+                unique_candidates.append(cand)
+
+        inserted_fps = []
+        if unique_candidates:
+            all_fps = [c["fingerprint"] for c in unique_candidates]
+            existing = {
+                row[0]
+                for row in db.query(Incident.fingerprint).filter(
+                    Incident.fingerprint.in_(all_fps)
+                )
             }
-            for inc, name in created_incidents
-        ]
+            mappings = [
+                {k: v for k, v in c.items() if k != "pattern_name"}
+                for c in unique_candidates
+                if c["fingerprint"] not in existing
+            ]
+            if mappings:
+                savepoint = db.begin_nested()
+                try:
+                    db.bulk_insert_mappings(Incident, mappings)
+                    db.flush()
+                except IntegrityError:
+                    # Lost the race: a concurrent chunk inserted one of
+                    # these fingerprints first. Roll back to the savepoint
+                    # — the delete above stays intact — re-read, and insert
+                    # only what's still missing.
+                    savepoint.rollback()
+                    existing = {
+                        row[0]
+                        for row in db.query(Incident.fingerprint).filter(
+                            Incident.fingerprint.in_(all_fps)
+                        )
+                    }
+                    mappings = [
+                        m for m in mappings if m["fingerprint"] not in existing
+                    ]
+                    if mappings:
+                        db.bulk_insert_mappings(Incident, mappings)
+                        db.flush()
+            inserted_fps = [m["fingerprint"] for m in mappings]
+
+        incidents_created = len(inserted_fps)
+        dedup_skipped = len(candidates) - incidents_created
+        inserted_set = set(inserted_fps)
+        meta_by_fp = {
+            c["fingerprint"]: c
+            for c in unique_candidates
+            if c["fingerprint"] in inserted_set
+        }
+        matched_patterns = sorted({c["pattern_name"] for c in meta_by_fp.values()})
+
+        # bulk_insert_mappings does not populate ORM ids, and the commit
+        # below expires state anyway: re-select ids for the event
+        # payloads. Fingerprints are globally unique, so these rows are
+        # unambiguously the ones this chunk just inserted.
+        id_by_fp = {}
+        if inserted_fps:
+            id_by_fp = {
+                fp: inc_id
+                for inc_id, fp in db.query(
+                    Incident.id, Incident.fingerprint
+                ).filter(Incident.fingerprint.in_(inserted_fps))
+            }
+        # One commit covers the delete + the bulk insert atomically, as
+        # before. Events publish only after it lands, so they never
+        # describe rolled-back rows — and only for actually-inserted
+        # incidents, never dedup-skipped ones. Publishing is best-effort
+        # (see events.py).
         db.commit()
-        for payload in pending_events:
+        for fp in inserted_fps:
+            cand = meta_by_fp[fp]
             emit_incident_created(
                 job_id=job_id,
                 chunk_index=chunk_index,
-                **payload,
+                incident_id=id_by_fp[fp],
+                pattern_id=cand["pattern_id"],
+                pattern_name=cand["pattern_name"],
+                severity=cand["severity"].value,
             )
 
         # --- Progress: atomic increment, safe under concurrent chunks. ---
@@ -377,14 +465,16 @@ def process_chunk(
 
         logger.info(
             f"Job {job_id} chunk {chunk_index} done: "
-            f"{incidents_created} incidents from {lines_in_slice} lines"
+            f"{incidents_created} incidents from {lines_in_slice} lines "
+            f"({dedup_skipped} duplicates skipped)"
         )
         return {
             "chunk_index": chunk_index,
             "status": "completed",
             "lines": lines_in_slice,
             "incidents_created": incidents_created,
-            "patterns_matched": sorted(matched_patterns),
+            "dedup_skipped": dedup_skipped,
+            "patterns_matched": matched_patterns,
         }
     except Exception as e:
         db.rollback()
@@ -424,6 +514,7 @@ def finalize_job(self, chunk_results, job_id):
 
         total_lines = sum(r.get("lines", 0) for r in succeeded)
         incidents_created = sum(r.get("incidents_created", 0) for r in succeeded)
+        dedup_skipped = sum(r.get("dedup_skipped", 0) for r in succeeded)
         patterns_matched = sorted(
             {p for r in succeeded for p in r.get("patterns_matched", [])}
         )
@@ -432,6 +523,7 @@ def finalize_job(self, chunk_results, job_id):
             "total_lines": total_lines,
             "processed_lines": total_lines,
             "incidents_created": incidents_created,
+            "dedup_skipped": dedup_skipped,
             "patterns_matched": patterns_matched,
             "total_chunks": len(results),
             "failed_chunks": [r.get("chunk_index") for r in failed],
@@ -573,6 +665,7 @@ def process_log_file(
         total_lines = len(lines)
         processed_lines = 0
         incidents_created = 0
+        dedup_skipped = 0
         # (incident, pattern_name) pairs; published at each commit point so
         # SSE subscribers see incidents as the legacy path progresses.
         created_incidents = []
@@ -615,7 +708,12 @@ def process_log_file(
             # Single-pass match: first win by severity rank (CRITICAL first).
             winner = match_line(matcher, line)
             if winner is not None:
-                # Create incident
+                # Create incident. The fingerprint is set here so legacy
+                # rows carry the same identity scheme as chunked rows (see
+                # src/workers/fingerprint.py); the dedup filter at each
+                # commit point below decides whether it is inserted.
+                # Counts (incidents_created / matched_pattern_names) are
+                # updated there too, over inserted rows only.
                 incident = Incident(
                     title=f"Pattern Match: {winner.name}",
                     description=winner.description
@@ -626,14 +724,12 @@ def process_log_file(
                     node_id=node.id if node else None,
                     pattern_id=winner.id,
                     job_id=job_id,
+                    fingerprint=compute_fingerprint(
+                        winner.id, node.id if node else None, line
+                    ),
                 )
                 db.add(incident)
                 created_incidents.append((incident, winner.name))
-                incidents_created += 1
-                matched_pattern_names.add(winner.name)
-                logger.info(
-                    f"Created incident {incidents_created} for pattern '{winner.name}' on line: {line[:50]}..."
-                )
 
             processed_lines += 1
 
@@ -656,9 +752,37 @@ def process_log_file(
                 except Exception as celery_error:
                     logger.warning(f"Could not update Celery state: {celery_error}")
 
+                # Idempotency for the legacy path: drop candidates whose
+                # fingerprint already exists (re-ingest of the same file).
+                # Pending objects are expunged before flush, so they are
+                # never inserted and never emit events. Without this, the
+                # UNIQUE constraint on fingerprint would turn a re-run into
+                # an IntegrityError instead of a clean no-op. The `existing`
+                # set absorbs each batch's own fingerprints as it goes, so
+                # duplicate lines within one batch dedup too.
+                # chunk_index=None: this is the legacy monolithic path.
+                batch = created_incidents[published_incidents:]
+                fresh = []
+                if batch:
+                    existing = {
+                        row[0]
+                        for row in db.query(Incident.fingerprint).filter(
+                            Incident.fingerprint.in_(
+                                [inc.fingerprint for inc, _ in batch]
+                            )
+                        )
+                    }
+                    for inc, name in batch:
+                        if inc.fingerprint in existing:
+                            db.expunge(inc)
+                            dedup_skipped += 1
+                        else:
+                            existing.add(inc.fingerprint)
+                            fresh.append((inc, name))
+                    incidents_created += len(fresh)
+                    matched_pattern_names.update(name for _, name in fresh)
                 # Flush to assign ids, then publish incident events only
                 # after the commit lands (never describe rolled-back rows).
-                # chunk_index=None: this is the legacy monolithic path.
                 db.flush()
                 pending = [
                     {
@@ -667,7 +791,7 @@ def process_log_file(
                         "pattern_name": name,
                         "severity": inc.severity.value,
                     }
-                    for inc, name in created_incidents[published_incidents:]
+                    for inc, name in fresh
                 ]
                 published_incidents = len(created_incidents)
                 db.commit()
@@ -690,10 +814,12 @@ def process_log_file(
             "total_lines": total_lines,
             "processed_lines": processed_lines,
             "incidents_created": incidents_created,
+            "dedup_skipped": dedup_skipped,
             # Winners tracked during the single pass above; the old code
             # re-scanned every pattern over every line here (O(P*L)).
             # Shape unchanged (int); semantics now count patterns that
-            # won at least one line under first-match-wins.
+            # won at least one line under first-match-wins, over
+            # inserted incidents only.
             "patterns_matched": len(matched_pattern_names),
         }
         job.result_summary = json.dumps(summary)
