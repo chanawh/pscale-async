@@ -63,7 +63,7 @@ class PatternTestResponse(BaseModel):
 
 
 @router.get("/patterns")
-async def get_patterns(
+def get_patterns(
     category: Optional[str] = Query(None, description="Filter by category"),
     severity: Optional[str] = Query(None, description="Filter by severity"),
     is_active: Optional[bool] = Query(None, description="Filter by active status"),
@@ -117,14 +117,14 @@ async def get_patterns(
 
 
 @router.get("/patterns/categories")
-async def get_pattern_categories(db: Session = Depends(get_db)):
+def get_pattern_categories(db: Session = Depends(get_db)):
     """Get all unique pattern categories."""
     categories = db.query(Pattern.category).distinct().all()
     return [c[0] for c in categories if c[0]]
 
 
 @router.get("/patterns/{pattern_id}", response_model=PatternResponse)
-async def get_pattern(pattern_id: int, db: Session = Depends(get_db)):
+def get_pattern(pattern_id: int, db: Session = Depends(get_db)):
     """Get a specific pattern by ID."""
     pattern = db.query(Pattern).filter(Pattern.id == pattern_id).first()
     if not pattern:
@@ -150,7 +150,7 @@ async def get_pattern(pattern_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("/patterns", response_model=PatternResponse)
-async def create_pattern(pattern_data: PatternCreate, db: Session = Depends(get_db)):
+def create_pattern(pattern_data: PatternCreate, db: Session = Depends(get_db)):
     """Create a new pattern."""
     # Check for duplicate name
     existing = db.query(Pattern).filter(Pattern.name == pattern_data.name).first()
@@ -195,7 +195,7 @@ async def create_pattern(pattern_data: PatternCreate, db: Session = Depends(get_
 
 
 @router.put("/patterns/{pattern_id}", response_model=PatternResponse)
-async def update_pattern(
+def update_pattern(
     pattern_id: int, pattern_data: PatternUpdate, db: Session = Depends(get_db)
 ):
     """Update an existing pattern."""
@@ -250,7 +250,7 @@ async def update_pattern(
 
 
 @router.put("/patterns/{pattern_id}/toggle", response_model=PatternResponse)
-async def toggle_pattern(
+def toggle_pattern(
     pattern_id: int, toggle_data: PatternToggle, db: Session = Depends(get_db)
 ):
     """Toggle pattern active status."""
@@ -281,7 +281,7 @@ async def toggle_pattern(
 
 
 @router.delete("/patterns/{pattern_id}")
-async def delete_pattern(pattern_id: int, db: Session = Depends(get_db)):
+def delete_pattern(pattern_id: int, db: Session = Depends(get_db)):
     """Delete a pattern (only if no incidents are linked)."""
     pattern = db.query(Pattern).filter(Pattern.id == pattern_id).first()
     if not pattern:
@@ -304,7 +304,7 @@ async def delete_pattern(pattern_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("/patterns/test", response_model=PatternTestResponse)
-async def test_pattern(test_data: PatternTestRequest):
+def test_pattern(test_data: PatternTestRequest):
     """Test a regex pattern against a log line."""
     import re
 

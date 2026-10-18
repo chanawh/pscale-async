@@ -92,7 +92,7 @@ def is_safe_query(query: str) -> tuple[bool, Optional[str]]:
 
 
 @router.post("/query", response_model=QueryResponse)
-async def execute_query(request: QueryRequest, db: Session = Depends(get_db)):
+def execute_query(request: QueryRequest, db: Session = Depends(get_db)):
     """
     Execute a read-only SQL query and return results.
     Only SELECT queries are allowed for safety.
@@ -141,7 +141,7 @@ async def execute_query(request: QueryRequest, db: Session = Depends(get_db)):
 
 
 @router.get("/tables", response_model=List[Dict[str, Any]])
-async def list_tables(db: Session = Depends(get_db)):
+def list_tables(db: Session = Depends(get_db)):
     """List all database tables with basic info."""
     inspector = inspect(db.bind)
     tables = []
@@ -165,7 +165,7 @@ async def list_tables(db: Session = Depends(get_db)):
 
 
 @router.get("/schema/{table_name}", response_model=TableInfo)
-async def get_table_schema(table_name: str, db: Session = Depends(get_db)):
+def get_table_schema(table_name: str, db: Session = Depends(get_db)):
     """Get detailed schema for a specific table."""
     inspector = inspect(db.bind)
 
@@ -233,7 +233,7 @@ async def get_table_schema(table_name: str, db: Session = Depends(get_db)):
 
 
 @router.get("/schema", response_model=SchemaResponse)
-async def get_full_schema(db: Session = Depends(get_db)):
+def get_full_schema(db: Session = Depends(get_db)):
     """Get complete database schema for all tables."""
     inspector = inspect(db.bind)
     tables = []
@@ -277,7 +277,7 @@ async def get_full_schema(db: Session = Depends(get_db)):
 
 
 @router.get("/quick-queries", response_model=List[QuickQuery])
-async def get_quick_queries():
+def get_quick_queries():
     """Get list of predefined useful queries from README.md."""
     queries = [
         QuickQuery(

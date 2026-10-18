@@ -125,7 +125,7 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
 
 
 @router.post("/login", response_model=TokenResponse)
-async def login(login_data: LoginRequest):
+def login(login_data: LoginRequest):
     """Authenticate user and return JWT tokens"""
     try:
         user = authenticate_user(login_data.username, login_data.password)
@@ -156,7 +156,7 @@ async def login(login_data: LoginRequest):
 
 
 @router.post("/refresh", response_model=TokenResponse)
-async def refresh_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
+def refresh_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
     """Refresh access token using refresh token"""
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
@@ -194,7 +194,7 @@ async def refresh_token(credentials: HTTPAuthorizationCredentials = Depends(secu
 
 
 @router.get("/me", response_model=UserResponse)
-async def get_current_user_info(current_user: dict = Depends(get_current_user)):
+def get_current_user_info(current_user: dict = Depends(get_current_user)):
     """Get current user information"""
     return {
         "id": current_user["id"],
@@ -205,7 +205,7 @@ async def get_current_user_info(current_user: dict = Depends(get_current_user)):
 
 
 @router.post("/logout")
-async def logout():
+def logout():
     """Logout endpoint - in a real implementation this would invalidate the token"""
     # For JWT tokens, logout is typically handled client-side by removing the token
     # This endpoint exists for API completeness and future server-side token invalidation

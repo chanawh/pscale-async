@@ -169,7 +169,7 @@ def classify_node_type(hostname: str, log_content: str) -> str:
 
 
 @router.post("/ingest", summary="Upload and process log file")
-async def ingest_log_file(
+def ingest_log_file(
     file: UploadFile = File(...),
     node_hostname: Optional[str] = Form(None),
     description: Optional[str] = Form(None),
@@ -223,7 +223,10 @@ async def ingest_log_file(
         bytes_written = 0
         with tempfile.SpooledTemporaryFile(max_size=1024 * 1024) as spill:
             while True:
-                chunk = await file.read(STREAM_CHUNK_BYTES)
+                # Sync endpoint (FastAPI runs these in a threadpool), so read
+                # the underlying file object directly instead of awaiting
+                # UploadFile.read() — identical bytes, no event loop to block.
+                chunk = file.file.read(STREAM_CHUNK_BYTES)
                 if not chunk:
                     break
                 bytes_written += len(chunk)
@@ -390,7 +393,7 @@ async def ingest_log_file(
 
 
 @router.post("/ingest/stream", summary="Stream log lines for processing")
-async def ingest_log_stream(
+def ingest_log_stream(
     request: LogStreamRequest,
     db: Session = Depends(get_db),
 ):
@@ -552,7 +555,7 @@ async def ingest_log_stream(
 
 
 @router.post("/ingest/cluster", summary="Ingest logs from OneFS cluster via tunnel")
-async def ingest_cluster_logs(
+def ingest_cluster_logs(
     log_path: str = "/var/log/messages",
     node_hostname: Optional[str] = None,
     description: Optional[str] = None,
@@ -664,7 +667,7 @@ async def ingest_cluster_logs(
 
 
 @router.get("/cluster/status", summary="Check OneFS cluster connectivity")
-async def check_cluster_status():
+def check_cluster_status():
     """
     Check connectivity to OneFS cluster through SSH tunnel.
 

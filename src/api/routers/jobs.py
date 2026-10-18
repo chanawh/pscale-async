@@ -1,4 +1,3 @@
-import asyncio
 import json
 from typing import List, Optional
 
@@ -16,7 +15,7 @@ router = APIRouter(dependencies=[Depends(get_current_user)])
 
 
 @router.get("/jobs", summary="Get all jobs")
-async def get_jobs(
+def get_jobs(
     skip: int = Query(0, ge=0, description="Number of records to skip"),
     limit: int = Query(
         100, ge=1, le=1000, description="Maximum number of records to return"
@@ -68,7 +67,7 @@ async def get_jobs(
 
 
 @router.get("/jobs/{job_id}", summary="Get job by ID")
-async def get_job(job_id: str, db: Session = Depends(get_db)):
+def get_job(job_id: str, db: Session = Depends(get_db)):
     """Retrieve a specific job by ID"""
 
     job = db.query(Job).filter(Job.id == job_id).first()
@@ -105,7 +104,7 @@ async def get_job(job_id: str, db: Session = Depends(get_db)):
 
 
 @router.delete("/jobs/{job_id}", summary="Delete job")
-async def delete_job(job_id: str, db: Session = Depends(get_db)):
+def delete_job(job_id: str, db: Session = Depends(get_db)):
     """Delete a job and its associated incidents"""
 
     job = db.query(Job).filter(Job.id == job_id).first()
@@ -132,7 +131,7 @@ async def delete_job(job_id: str, db: Session = Depends(get_db)):
 
 
 @router.post("/jobs/{job_id}/cancel", summary="Cancel job")
-async def cancel_job(job_id: str, db: Session = Depends(get_db)):
+def cancel_job(job_id: str, db: Session = Depends(get_db)):
     """Cancel a running job"""
 
     job = db.query(Job).filter(Job.id == job_id).first()
@@ -171,7 +170,7 @@ async def cancel_job(job_id: str, db: Session = Depends(get_db)):
 # the frontend. The old polling endpoint never worked, so replacing it is
 # safe; see the commit message.
 @router.get("/jobs/{job_id}/events", summary="Job progress events (SSE)")
-async def job_events(job_id: str, db: Session = Depends(get_db)):
+def job_events(job_id: str, db: Session = Depends(get_db)):
     """
     Server-Sent Events over the Redis pub/sub domain event bus.
 
@@ -213,7 +212,7 @@ async def job_events(job_id: str, db: Session = Depends(get_db)):
         finally:
             session.close()
 
-    async def event_generator():
+    def event_generator():
         # Already terminal: one snapshot + complete, no subscription needed.
         if terminal:
             yield f"event: progress\ndata: {json.dumps(snapshot)}\n\n"
@@ -232,9 +231,10 @@ async def job_events(job_id: str, db: Session = Depends(get_db)):
         try:
             yield f"event: progress\ndata: {json.dumps(snapshot)}\n\n"
             while True:
-                # Blocking get() runs in a thread so the event loop stays
-                # free; None means the 20s heartbeat window elapsed.
-                msg = await asyncio.to_thread(sub.get, 20.0)
+                # Sync generator (StreamingResponse runs these in a
+                # threadpool), so the blocking get() with its 20s timeout is
+                # fine directly; None means the heartbeat window elapsed.
+                msg = sub.get(20.0)
                 if msg is None:
                     yield ": ping\n\n"
                     continue

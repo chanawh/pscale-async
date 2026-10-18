@@ -57,7 +57,7 @@ app.include_router(admin_router, prefix="/api/v1", tags=["database-admin"])
 
 
 @app.get("/", tags=["health"])
-async def root():
+def root():
     """Root endpoint"""
     return {
         "message": "Async Log Intelligence API",
@@ -67,7 +67,7 @@ async def root():
 
 
 @app.on_event("startup")
-async def startup_event():
+def startup_event():
     """Initialize database tables and default data on startup"""
     from src.db.database import SessionLocal, create_tables
     from src.workers.log_processor import create_default_patterns
@@ -88,7 +88,7 @@ async def startup_event():
 
 
 @app.get("/health", tags=["health"])
-async def health_check(db: Session = Depends(get_db)):
+def health_check(db: Session = Depends(get_db)):
     """Health check endpoint - returns degraded status instead of 503 for partial failures"""
     health_status = {"status": "healthy", "database": "unknown", "celery": "unknown"}
 
@@ -121,7 +121,7 @@ async def health_check(db: Session = Depends(get_db)):
 
 
 @app.get("/api/v1/summary", tags=["analytics"])
-async def get_summary(
+def get_summary(
     window_hours: int = 24,
     severity: Optional[str] = None,
     db: Session = Depends(get_db),
@@ -181,7 +181,7 @@ async def get_summary(
 
 
 @app.get("/api/v1/escalations", tags=["analytics"])
-async def get_escalations(
+def get_escalations(
     db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)
 ):
     """Get unresolved high-priority incidents"""

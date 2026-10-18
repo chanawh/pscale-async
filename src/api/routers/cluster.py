@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 
 @router.get("/status", response_model=Dict[str, Any])
-async def get_cluster_status():
+def get_cluster_status():
     """Get real cluster status from OneFS cluster"""
     try:
         client = OneFSClient()
@@ -153,7 +153,7 @@ async def get_cluster_status():
 
 
 @router.get("/nodes", response_model=Dict[str, Any])
-async def get_cluster_nodes():
+def get_cluster_nodes():
     """Get detailed node information from the cluster"""
     try:
         client = OneFSClient()
@@ -196,7 +196,7 @@ async def get_cluster_nodes():
 
 
 @router.get("/test-connection", response_model=Dict[str, Any])
-async def test_cluster_connection():
+def test_cluster_connection():
     """Test SSH connectivity to the OneFS cluster"""
     try:
         client = OneFSClient()

@@ -34,7 +34,7 @@ class StatusUpdateRequest(BaseModel):
 
 
 @router.get("/incidents", summary="Get incidents with filtering")
-async def get_incidents(
+def get_incidents(
     skip: int = Query(0, ge=0, description="Number of records to skip"),
     limit: int = Query(
         100, ge=1, le=1000, description="Maximum number of records to return"
@@ -151,7 +151,7 @@ async def get_incidents(
 
 
 @router.get("/incidents/{incident_id}", summary="Get incident by ID")
-async def get_incident(incident_id: int, db: Session = Depends(get_db)):
+def get_incident(incident_id: int, db: Session = Depends(get_db)):
     """Retrieve a specific incident by ID"""
 
     incident = db.query(Incident).filter(Incident.id == incident_id).first()
@@ -196,7 +196,7 @@ async def get_incident(incident_id: int, db: Session = Depends(get_db)):
 
 
 @router.put("/incidents/{incident_id}/status", summary="Update incident status")
-async def update_incident_status(
+def update_incident_status(
     incident_id: int, request: StatusUpdateRequest, db: Session = Depends(get_db)
 ):
     """Update the status of an incident with optional work details"""
@@ -272,7 +272,7 @@ async def update_incident_status(
 @router.get(
     "/incidents/{incident_id}/activity", summary="Get incident activity history"
 )
-async def get_incident_activity(
+def get_incident_activity(
     incident_id: int,
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=1000),

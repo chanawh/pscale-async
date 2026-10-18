@@ -46,7 +46,7 @@ class NodeUpdate(BaseModel):
 
 
 @router.get("/nodes")
-async def get_nodes(
+def get_nodes(
     node_type: Optional[str] = Query(None, description="Filter by node type"),
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=1000),
@@ -93,7 +93,7 @@ async def get_nodes(
 
 
 @router.get("/nodes/{node_id}", response_model=NodeResponse)
-async def get_node(node_id: int, db: Session = Depends(get_db)):
+def get_node(node_id: int, db: Session = Depends(get_db)):
     """Get a specific node by ID."""
     node = db.query(Node).filter(Node.id == node_id).first()
     if not node:
@@ -115,7 +115,7 @@ async def get_node(node_id: int, db: Session = Depends(get_db)):
 
 
 @router.get("/nodes/{node_id}/incidents")
-async def get_node_incidents(
+def get_node_incidents(
     node_id: int,
     status: Optional[str] = Query(None, description="Filter by status"),
     severity: Optional[str] = Query(None, description="Filter by severity"),
@@ -184,7 +184,7 @@ async def get_node_incidents(
 
 
 @router.post("/nodes", response_model=NodeResponse)
-async def create_node(node_data: NodeCreate, db: Session = Depends(get_db)):
+def create_node(node_data: NodeCreate, db: Session = Depends(get_db)):
     """Create a new node (manual entry)."""
     # Check for duplicate hostname
     existing = db.query(Node).filter(Node.hostname == node_data.hostname).first()
@@ -219,7 +219,7 @@ async def create_node(node_data: NodeCreate, db: Session = Depends(get_db)):
 
 
 @router.put("/nodes/{node_id}", response_model=NodeResponse)
-async def update_node(
+def update_node(
     node_id: int, node_data: NodeUpdate, db: Session = Depends(get_db)
 ):
     """Update an existing node."""
@@ -259,7 +259,7 @@ async def update_node(
 
 
 @router.delete("/nodes/{node_id}")
-async def delete_node(node_id: int, db: Session = Depends(get_db)):
+def delete_node(node_id: int, db: Session = Depends(get_db)):
     """Delete a node (only if no incidents are linked)."""
     node = db.query(Node).filter(Node.id == node_id).first()
     if not node:
@@ -280,7 +280,7 @@ async def delete_node(node_id: int, db: Session = Depends(get_db)):
 
 
 @router.get("/nodes/types/list")
-async def get_node_types(db: Session = Depends(get_db)):
+def get_node_types(db: Session = Depends(get_db)):
     """Get all unique node types."""
     types = db.query(Node.node_type).distinct().all()
     return [t[0] for t in types if t[0]]
