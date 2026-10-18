@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from src.db.database import get_db
 from src.api.routers.auth import get_current_user
-from src.models import ActionType, Incident, IncidentActivity, Severity, Status
+from src.models import ActionType, Incident, IncidentActivity, Job, Severity, Status
 
 router = APIRouter(dependencies=[Depends(get_current_user)])
 
@@ -53,6 +53,9 @@ def get_incidents(
     end_date: Optional[datetime] = Query(
         None, description="Filter incidents until this date"
     ),
+    cluster: Optional[str] = Query(
+        None, description="Filter by cluster name (via the parent job)"
+    ),
     db: Session = Depends(get_db),
 ):
     """
@@ -65,9 +68,15 @@ def get_incidents(
     - **pattern_id**: Pattern ID that matched
     - **start_date**: Start date for filtering
     - **end_date**: End date for filtering
+    - **cluster**: Cluster name of the parent job
     """
 
     query = db.query(Incident)
+
+    if cluster:
+        query = query.join(Job, Incident.job_id == Job.id).filter(
+            Job.cluster_name == cluster
+        )
 
     # Apply filters
     if severity:

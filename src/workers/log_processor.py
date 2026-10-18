@@ -190,7 +190,9 @@ def fanout_process_log(self, job_id, storage_ref, node_hostname=None, descriptio
             db.commit()
             # Terminal event so SSE subscribers see completion even though
             # no chord finalizer runs for this path.
-            emit_job_completed(job_id=job_id, summary=summary)
+            emit_job_completed(
+                job_id=job_id, summary=summary, cluster_name=job.cluster_name
+            )
             logger.info(f"Job {job_id}: empty upload, completed with 0 chunks")
             return {
                 "status": "completed",
@@ -205,6 +207,8 @@ def fanout_process_log(self, job_id, storage_ref, node_hostname=None, descriptio
         job.chunks_completed = 0
         db.commit()
 
+        # cluster_name rides along so chunk tasks publish events on the
+        # cluster-scoped channel without re-reading the job row.
         header = group(
             process_chunk.s(
                 job_id=job_id,
@@ -213,6 +217,7 @@ def fanout_process_log(self, job_id, storage_ref, node_hostname=None, descriptio
                 start_line=start,
                 end_line=end,
                 node_id=node_id,
+                cluster_name=job.cluster_name,
             )
             for i, (start, end) in enumerate(ranges)
         )
@@ -239,7 +244,10 @@ def fanout_process_log(self, job_id, storage_ref, node_hostname=None, descriptio
                 job.completed_at = datetime.utcnow()
                 db.commit()
                 emit_job_failed(
-                    job_id=job_id, error=job.error_message, summary=None
+                    job_id=job_id,
+                    error=job.error_message,
+                    summary=None,
+                    cluster_name=job.cluster_name,
                 )
         except Exception as db_error:
             logger.error(f"Could not mark job {job_id} failed: {db_error}")
@@ -251,37 +259,54 @@ def fanout_process_log(self, job_id, storage_ref, node_hostname=None, descriptio
 
 
 @celery_app.task(bind=True, max_retries=3)
-def ingest_cluster_log(self, job_id, log_path, node_hostname=None, description=None):
-    """Fetch a log file from the OneFS cluster over SSH and queue it.
+def ingest_cluster_log(
+    self, job_id, log_path, node_hostname=None, description=None, cluster_name=None
+):
+    """Fetch a log file from a OneFS cluster over SSH and queue it.
 
     Request handlers never do this work: the API validates ``log_path``,
     creates the job row, and enqueues this task with a 202 response. The
-    worker fetches the file, streams it into the storage backend, records
-    the content reference on the job, and delegates to
+    worker resolves the cluster's client from the per-cluster registry,
+    fetches the file, streams it into the storage backend, records the
+    content reference on the job, and delegates to
     ``fanout_process_log`` -- the same chunked pipeline uploads go through.
+
+    ``cluster_name`` selects the configured target (None = default
+    cluster). The job row records it, and progress/incident events publish
+    on the cluster-scoped channel.
     """
     from src.core.storage import build_object_key
-    from src.onefs.client import OneFSClient, validate_log_path
+    from src.onefs.client import validate_log_path
+    from src.onefs.registry import get_cluster_client
 
     db = SessionLocal()
     try:
         job, db = _get_job_or_raise(db, job_id)
 
+        # Resolve the cluster client first: unknown names fail here
+        # (the endpoint also validates, but task args can originate
+        # anywhere). The client's target carries this cluster's log_dir.
+        client = get_cluster_client(cluster_name)
+
         # Defense in depth: the endpoint validated this, but task args can
         # originate anywhere. Never let an unvalidated path reach SSH.
+        # Validated against THIS cluster's log_dir, not the global default.
         try:
-            safe_path = validate_log_path(log_path, settings.onefs_log_dir)
+            safe_path = validate_log_path(log_path, client.log_dir)
         except ValueError as e:
             raise Exception(f"Invalid log_path rejected: {e}")
 
         job.status = JobStatus.PROCESSING
+        job.cluster_name = client.target_name
         db.commit()
 
-        client = OneFSClient()
         try:
             log_content = client.get_log_file(safe_path)
         except Exception as e:
-            raise Exception(f"SSH fetch of {safe_path} failed: {e}")
+            raise Exception(
+                f"SSH fetch of {safe_path} from cluster "
+                f"'{client.target_name}' failed: {e}"
+            )
 
         if not log_content or not log_content.strip():
             raise Exception(f"No log content returned from {safe_path}")
@@ -321,7 +346,12 @@ def ingest_cluster_log(self, job_id, log_path, node_hostname=None, description=N
                 job.error_message = str(e)
                 job.completed_at = datetime.utcnow()
                 db.commit()
-                emit_job_failed(job_id=job_id, error=job.error_message, summary=None)
+                emit_job_failed(
+                    job_id=job_id,
+                    error=job.error_message,
+                    summary=None,
+                    cluster_name=job.cluster_name,
+                )
         except Exception as db_error:
             logger.error(f"Could not mark job {job_id} failed: {db_error}")
         raise
@@ -331,7 +361,14 @@ def ingest_cluster_log(self, job_id, log_path, node_hostname=None, description=N
 
 @celery_app.task(bind=True, max_retries=3)
 def process_chunk(
-    self, job_id, chunk_index, storage_ref, start_line, end_line, node_id=None
+    self,
+    job_id,
+    chunk_index,
+    storage_ref,
+    start_line,
+    end_line,
+    node_id=None,
+    cluster_name=None,
 ):
     """Process one line slice ``[start_line, end_line)`` of the stored object.
 
@@ -506,6 +543,7 @@ def process_chunk(
                 pattern_id=cand["pattern_id"],
                 pattern_name=cand["pattern_name"],
                 severity=cand["severity"].value,
+                cluster_name=cluster_name,
             )
 
         # --- Progress: atomic increment, safe under concurrent chunks. ---
@@ -525,6 +563,7 @@ def process_chunk(
                 chunks_completed=job.chunks_completed or 0,
                 total_chunks=job.total_chunks or 0,
                 progress=job.progress or 0,
+                cluster_name=cluster_name,
             )
 
         # Per-chunk Celery state replaces the old per-100-lines updates.
@@ -639,10 +678,15 @@ def finalize_job(self, chunk_results, job_id):
         # event bus must not break finalization.
         if failed:
             emit_job_failed(
-                job_id=job_id, error=job.error_message or "", summary=summary
+                job_id=job_id,
+                error=job.error_message or "",
+                summary=summary,
+                cluster_name=job.cluster_name,
             )
         else:
-            emit_job_completed(job_id=job_id, summary=summary)
+            emit_job_completed(
+                job_id=job_id, summary=summary, cluster_name=job.cluster_name
+            )
         return {"job_id": job_id, "status": job.status.value, **summary}
     except Exception as e:
         logger.error(f"Job {job_id} finalize failed: {str(e)}")
@@ -876,13 +920,17 @@ def process_log_file(
                 db.commit()
                 for payload in pending:
                     emit_incident_created(
-                        job_id=job_id, chunk_index=None, **payload
+                        job_id=job_id,
+                        chunk_index=None,
+                        cluster_name=getattr(job, "cluster_name", None),
+                        **payload,
                     )
                 emit_job_progress(
                     job_id=job_id,
                     chunks_completed=0,
                     total_chunks=0,
                     progress=progress,
+                    cluster_name=getattr(job, "cluster_name", None),
                 )
 
         # Update job status
@@ -908,7 +956,11 @@ def process_log_file(
         )
 
         db.commit()
-        emit_job_completed(job_id=job_id, summary=summary)
+        emit_job_completed(
+            job_id=job_id,
+            summary=summary,
+            cluster_name=getattr(job, "cluster_name", None),
+        )
 
         # Clean up the legacy local temp file. Objects fetched via a
         # storage reference are intentionally kept: the stored object is the
@@ -933,7 +985,12 @@ def process_log_file(
             job.error_message = str(e)
             job.completed_at = datetime.utcnow()
             db.commit()
-            emit_job_failed(job_id=job_id, error=str(e), summary=None)
+            emit_job_failed(
+                job_id=job_id,
+                error=str(e),
+                summary=None,
+                cluster_name=getattr(job, "cluster_name", None),
+            )
 
         # Clean up the legacy local temp file. Objects fetched via a
         # storage reference are intentionally kept: the stored object is the

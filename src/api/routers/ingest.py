@@ -6,7 +6,7 @@ import tempfile
 import uuid
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -23,6 +23,7 @@ from src.db.database import get_db
 from src.api.routers.auth import get_current_user
 from src.models import Job, JobStatus, Node
 from src.onefs.client import validate_log_path
+from src.onefs.targets import ClusterNotFoundError, resolve_target
 from src.workers.log_processor import ingest_cluster_log, process_log_file
 
 router = APIRouter(tags=["ingestion"], dependencies=[Depends(get_current_user)])
@@ -481,19 +482,25 @@ def ingest_log_stream(
         )
 
 
-@router.post("/ingest/cluster", summary="Ingest logs from OneFS cluster via tunnel", status_code=202)
+@router.post("/ingest/cluster", summary="Ingest logs from a OneFS cluster via SSH", status_code=202)
 def ingest_cluster_logs(
     log_path: str = "/var/log/messages",
     node_hostname: Optional[str] = None,
     description: Optional[str] = None,
+    cluster: Optional[str] = Query(
+        None,
+        description="Target cluster name from ONEFS_TARGETS (default: the "
+        "first configured cluster)",
+    ),
     db: Session = Depends(get_db),
 ):
     """
-    Queue a log fetch from the OneFS cluster via SSH tunnel.
+    Queue a log fetch from a OneFS cluster via SSH.
 
-    - **log_path**: Path to log file on OneFS cluster (default: /var/log/messages)
+    - **log_path**: Path to log file on the cluster (default: /var/log/messages)
     - **node_hostname**: Optional hostname for the source node
     - **description**: Optional description of the ingestion
+    - **cluster**: Target cluster name (default: first configured cluster)
 
     Validates ``log_path``, creates the job, enqueues the fetch + process
     pipeline, and returns **202 Accepted** immediately with the job id.
@@ -507,7 +514,12 @@ def ingest_cluster_logs(
     metacharacters or ``..`` segments — anything else is rejected with 400.
     """
     try:
-        safe_path = validate_log_path(log_path, settings.onefs_log_dir)
+        target = resolve_target(cluster)
+    except ClusterNotFoundError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    try:
+        safe_path = validate_log_path(log_path, target["log_dir"])
     except ValueError as e:
         raise HTTPException(status_code=400, detail=f"Invalid log_path: {e}")
 
@@ -518,6 +530,7 @@ def ingest_cluster_logs(
         file_size=0,
         status=JobStatus.PENDING,
         description=description or f"OneFS cluster log: {safe_path}",
+        cluster_name=target["name"],
     )
     db.add(job)
     db.commit()
@@ -529,6 +542,7 @@ def ingest_cluster_logs(
             log_path=safe_path,
             node_hostname=node_hostname,
             description=description,
+            cluster_name=target["name"],
         )
     except Exception as e:
         # Broker unreachable: don't fail open by doing the work inline —
@@ -539,10 +553,14 @@ def ingest_cluster_logs(
         db.commit()
         raise HTTPException(status_code=503, detail="Task queue unavailable; try again shortly")
 
-    logger.info(f"Cluster ingest queued: job {job_id}, path {safe_path}, task {task.id}")
+    logger.info(
+        f"Cluster ingest queued: job {job_id}, cluster '{target['name']}', "
+        f"path {safe_path}, task {task.id}"
+    )
     return {
         "job_id": job_id,
         "status": "queued",
-        "message": f"Cluster log fetch queued for {safe_path}",
+        "message": f"Cluster log fetch queued for {safe_path} on cluster '{target['name']}'",
         "celery_task_id": task.id,
+        "cluster_name": target["name"],
     }

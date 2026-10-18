@@ -156,6 +156,36 @@ Methodology: `python3 scripts/bench_matcher.py` (synthetic lines, real
 23-pattern library, best-of-3); absolute lines/sec are machine-dependent,
 ratios are the comparable figure.
 
+### Multi-Cluster Support
+
+One deployment can serve many OneFS clusters. Targets are configured via
+`ONEFS_TARGETS` (JSON) or `ONEFS_TARGETS_FILE` (JSON/YAML file, handy for
+k8s Secret mounts); every target needs a host and a password (fail fast),
+names must be unique. Omit both and the single-cluster `ONEFS_HOST` /
+`ONEFS_USER` / `ONEFS_PASS` variables become the one default target —
+existing single-cluster setups behave exactly as before.
+
+- `POST /api/v1/ingest/cluster?cluster=prod` ingests from the named
+  cluster (unknown names are rejected with 400); the job records
+  `cluster_name`, and progress/incident events publish on the
+  cluster-scoped channel `job:{cluster}:{job_id}` (unclustered jobs keep
+  the bare `job:{job_id}` channel).
+- `GET /api/v1/jobs?cluster=prod` and `GET /api/v1/incidents?cluster=prod`
+  filter by cluster.
+- SSH clients are pooled per cluster in a thread-safe registry
+  (`src/onefs/registry.py`); each target carries its own `log_dir` used
+  for path validation.
+
+```yaml
+# docker-compose.yml (two clusters)
+services:
+  api:
+    environment:
+      ONEFS_TARGETS: >-
+        [{"name":"prod","host":"10.0.0.5","user":"root","password":"${ONEFS_PASS_PROD}"},
+         {"name":"dr","host":"10.0.1.5","user":"root","password":"${ONEFS_PASS_DR}","log_dir":"/var/log/onefs"}]
+```
+
 ---
 
 ## 🛠️ Technology Stack

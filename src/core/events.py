@@ -35,8 +35,16 @@ logger = logging.getLogger(__name__)
 DEFAULT_REDIS_URL = "redis://localhost:6379/0"
 
 
-def job_channel(job_id: str) -> str:
-    """Channel carrying all domain events for one job."""
+def job_channel(job_id: str, cluster_name: Optional[str] = None) -> str:
+    """Channel carrying all domain events for one job.
+
+    Cluster-scoped as ``job:{cluster}:{job_id}`` so subscribers to one
+    cluster never see another's events. The bare ``job:{job_id}`` form is
+    kept for jobs with no cluster (uploads, streams, pre-multi-cluster
+    jobs) -- backwards compatible.
+    """
+    if cluster_name:
+        return f"job:{cluster_name}:{job_id}"
     return f"job:{job_id}"
 
 
@@ -253,11 +261,12 @@ def emit_incident_created(
     pattern_id: int,
     pattern_name: str,
     severity: str,
+    cluster_name: Optional[str] = None,
 ) -> bool:
     """An incident row was committed. ``chunk_index`` is None for the
     legacy monolithic path."""
     return publish_event(
-        job_channel(job_id),
+        job_channel(job_id, cluster_name),
         {
             "type": "incident.created",
             "incident_id": incident_id,
@@ -276,12 +285,13 @@ def emit_job_progress(
     chunks_completed: int,
     total_chunks: int,
     progress: int,
+    cluster_name: Optional[str] = None,
 ) -> bool:
     """A chunk finished (or the legacy path hit a progress checkpoint).
     ``chunks_completed``/``total_chunks`` are 0 for the legacy path, which
     reports ``progress`` directly."""
     return publish_event(
-        job_channel(job_id),
+        job_channel(job_id, cluster_name),
         {
             "type": "job.progress",
             "job_id": job_id,
@@ -292,16 +302,24 @@ def emit_job_progress(
     )
 
 
-def emit_job_completed(*, job_id: str, summary: dict) -> bool:
+def emit_job_completed(
+    *, job_id: str, summary: dict, cluster_name: Optional[str] = None
+) -> bool:
     return publish_event(
-        job_channel(job_id),
+        job_channel(job_id, cluster_name),
         {"type": "job.completed", "job_id": job_id, "summary": summary},
     )
 
 
-def emit_job_failed(*, job_id: str, error: str, summary: Optional[dict] = None) -> bool:
+def emit_job_failed(
+    *,
+    job_id: str,
+    error: str,
+    summary: Optional[dict] = None,
+    cluster_name: Optional[str] = None,
+) -> bool:
     return publish_event(
-        job_channel(job_id),
+        job_channel(job_id, cluster_name),
         {
             "type": "job.failed",
             "job_id": job_id,

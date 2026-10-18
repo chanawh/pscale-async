@@ -267,23 +267,35 @@ def validate_log_path(log_path: str, base_dir: str = "/var/log") -> str:
 
 
 class OneFSClient:
-    """OneFS client for accessing cluster resources through SSH tunnel"""
+    """OneFS client for accessing cluster resources through SSH tunnel.
 
-    def __init__(self):
+    ``target`` is a target dict as produced by
+    :func:`src.onefs.targets.load_targets` (``name``, ``host``, ``user``,
+    ``password``, ``port``, ``api_port``, ``log_dir``). ``None`` resolves
+    to the default cluster (first configured target), so single-cluster
+    deployments behave exactly as before. In mock mode every target
+    resolves to the mock client.
+    """
+
+    def __init__(self, target=None):
         # Check if we should use mock mode (development/demo)
         self.mock_mode = os.environ.get('ONEFS_MOCK_MODE', 'false').lower() == 'true'
-        
+
         if self.mock_mode:
             logger.info("OneFS client running in MOCK mode - no real cluster connection")
+            self.target_name = (target or {}).get("name", "mock")
             self._init_mock_mode()
         else:
-            logger.info("OneFS client running in REAL mode - attempting cluster connection")
-            self._init_real_mode()
-            
-        # Override with environment variable if set
-        if os.environ.get('ONEFS_MOCK_MODE', 'false').lower() == 'true':
-            self.mock_mode = True
-            logger.info("Overriding to MOCK mode via environment variable")
+            if target is None:
+                from src.onefs.targets import load_targets
+
+                target = load_targets()[0]
+            self.target_name = target["name"]
+            logger.info(
+                f"OneFS client running in REAL mode for cluster "
+                f"'{self.target_name}' - attempting cluster connection"
+            )
+            self._init_from_target(target)
     
     def _init_mock_mode(self):
         """Initialize mock mode for development"""
@@ -294,56 +306,42 @@ class OneFSClient:
         self.cluster_host = "mock-cluster.local"
         self.cluster_port = 22
         self.cluster_api_port = 8080
+        self.log_dir = "/var/log"
         self.username = "mock-user"
         self.password = "mock-pass"
         self.ssh_key_path = None
         self.base_url = f"https://{self.cluster_host}:{self.cluster_api_port}/platform/1"
         
-    def _init_real_mode(self):
-        """Initialize real cluster connection mode"""
-        # Fail fast: there are no default cluster credentials or addresses.
-        # For local development without a cluster, set ONEFS_MOCK_MODE=true.
-        cluster_host = settings.onefs_host or settings.cluster_host
-        cluster_user = settings.onefs_user or settings.isilon_user
-        if not cluster_host or not cluster_user:
-            raise RuntimeError(
-                "OneFS cluster access requires ONEFS_HOST and ONEFS_USER "
-                "environment variables (legacy aliases: CLUSTER_HOST / "
-                "ISILON_USER). Set ONEFS_MOCK_MODE=true for local development "
-                "without a cluster."
-            )
+    def _init_from_target(self, target):
+        """Initialize real cluster connection mode from a target dict.
 
-        # Use tunnel connection first (when running in Docker/Podman)
-        self.host = settings.isilon_host  # isilon-tunnel
-        self.port = settings.isilon_port  # 8080
+        ``target`` comes from :func:`src.onefs.targets.load_targets`,
+        which already failed fast on missing host/password -- there are no
+        default cluster credentials or addresses. For local development
+        without a cluster, set ONEFS_MOCK_MODE=true.
+        """
+        self.cluster_host = target["host"]
+        self.cluster_port = target["port"]
+        self.cluster_api_port = target["api_port"]
+        self.log_dir = target["log_dir"]
 
-        # Direct cluster connection (fallback for local dev)
-        self.cluster_host = cluster_host
-        self.cluster_port = settings.cluster_port
-        self.cluster_api_port = settings.cluster_api_port
-
-        self.username = cluster_user
-        self.password = settings.isilon_pass or settings.onefs_pass
+        self.username = target["user"]
+        self.password = target["password"]
         self.ssh_key_path = settings.ssh_key_path
 
-        # For local development, always use SSH (no HTTP API service on localhost:8080)
-        if self.host and self.host != "isilon-tunnel" and self.host != "localhost":
-            self.base_url = f"https://{self.host}:{self.port}/platform/1"
-        else:
-            # Local development - use SSH only
-            self.base_url = None  # Disable HTTP API
+        # Platform API base URL for this cluster's HTTP calls. Callers
+        # (get_cluster_info, list_log_files, get_file_info) try HTTP first
+        # and fall back to SSH, so an unreachable API degrades gracefully.
+        self.base_url = (
+            f"https://{self.cluster_host}:{self.cluster_api_port}/platform/1"
+        )
+        self.session = requests.Session()
+        self.session.auth = (self.username, self.password)
+        self.session.verify = False  # For self-signed certs
+        self.session.headers.update(
+            {"Accept": "application/json", "Content-Type": "application/json"}
+        )
 
-        # Only create session if we have HTTP API available
-        if self.base_url:
-            self.session = requests.Session()
-            self.session.auth = (self.username, self.password)
-            self.session.verify = False  # For self-signed certs
-            self.session.headers.update(
-                {"Accept": "application/json", "Content-Type": "application/json"}
-            )
-        else:
-            self.session = None  # SSH only mode
-        
         # Initialize reliable SSH connection for connection pooling
         self._ssh_connection = ReliableSSHConnection(
             host=self.cluster_host,
@@ -379,12 +377,14 @@ class OneFSClient:
     def get_log_file(self, log_path="/var/log/messages"):
         """Fetch log file content from OneFS through SSH tunnel.
 
-        SECURITY: log_path is strictly validated (must resolve under
-        settings.onefs_log_dir, no shell metacharacters) and shell-quoted —
+        SECURITY: log_path is strictly validated (must resolve under this
+        cluster's log_dir, no shell metacharacters) and shell-quoted —
         user input never reaches the remote shell raw, even though
         paramiko's exec_command always goes through it.
         """
-        safe_path = validate_log_path(log_path, settings.onefs_log_dir)
+        safe_path = validate_log_path(
+            log_path, getattr(self, "log_dir", None) or settings.onefs_log_dir
+        )
         try:
             # Use SSH to fetch log file directly
             command = f"cat {shlex.quote(safe_path)}"

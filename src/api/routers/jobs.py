@@ -21,12 +21,18 @@ def get_jobs(
         100, ge=1, le=1000, description="Maximum number of records to return"
     ),
     status: Optional[str] = Query(None, description="Filter by job status"),
+    cluster: Optional[str] = Query(
+        None, description="Filter by cluster name (multi-cluster deployments)"
+    ),
     db: Session = Depends(get_db),
 ):
     """
     Retrieve all jobs with optional filtering and pagination.
 
     - **status**: Filter by job status (PENDING, PROCESSING, COMPLETED, FAILED)
+    - **cluster**: Filter by cluster name. Jobs without a cluster (uploads,
+      streams, pre-multi-cluster jobs) are treated as the default cluster
+      and match only when no cluster filter is given.
     """
 
     query = db.query(Job)
@@ -40,6 +46,9 @@ def get_jobs(
                 status_code=400,
                 detail=f"Invalid status. Must be one of: {[s.value for s in JobStatus]}",
             )
+
+    if cluster:
+        query = query.filter(Job.cluster_name == cluster)
 
     total = query.count()
     jobs = query.order_by(Job.created_at.desc()).offset(skip).limit(limit).all()
@@ -55,6 +64,7 @@ def get_jobs(
                 "file_size": job.file_size,
                 "status": job.status.value,
                 "progress": job.progress,
+                "cluster_name": job.cluster_name,
                 "result_summary": job.result_summary,
                 "error_message": job.error_message,
                 "created_at": job.created_at,
@@ -94,6 +104,7 @@ def get_job(job_id: str, db: Session = Depends(get_db)):
         "file_size": job.file_size,
         "status": job.status.value,
         "progress": job.progress,
+        "cluster_name": job.cluster_name,
         "result_summary": job.result_summary,
         "error_message": job.error_message,
         "created_at": job.created_at,
@@ -174,11 +185,12 @@ def job_events(job_id: str, db: Session = Depends(get_db)):
     """
     Server-Sent Events over the Redis pub/sub domain event bus.
 
-    Subscribes to ``job:{job_id}`` instead of polling the database every
-    second per client. Emits the current snapshot first, then live
-    ``progress`` / ``incident`` events, then a terminal ``complete`` event.
-    A ``: ping`` heartbeat comment is sent every 20s so idle connections
-    are not killed by proxies during long jobs.
+    Subscribes to the job's channel (``job:{job_id}``, or
+    ``job:{cluster}:{job_id}`` for cluster-scoped jobs) instead of polling
+    the database every second per client. Emits the current snapshot first,
+    then live ``progress`` / ``incident`` events, then a terminal
+    ``complete`` event. A ``: ping`` heartbeat comment is sent every 20s so
+    idle connections are not killed by proxies during long jobs.
     """
     job = db.query(Job).filter(Job.id == job_id).first()
     if not job:
@@ -189,6 +201,9 @@ def job_events(job_id: str, db: Session = Depends(get_db)):
         "progress": job.progress or 0,
     }
     terminal = job.status in (JobStatus.COMPLETED, JobStatus.FAILED)
+    # Capture before db.close(): the generator below runs on a detached
+    # instance, and only already-loaded attributes are safe to touch.
+    job_cluster = job.cluster_name
     db.close()
 
     def _full_snapshot() -> dict:
@@ -219,8 +234,12 @@ def job_events(job_id: str, db: Session = Depends(get_db)):
             yield f"event: complete\ndata: {json.dumps(_full_snapshot())}\n\n"
             return
 
+        # Cluster-scoped channel: a subscriber to one cluster's job
+        # never sees another cluster's events. Unclustered jobs keep the
+        # bare job:{job_id} channel (backwards compatible).
+        channel = job_channel(job_id, job_cluster)
         try:
-            sub = get_event_bus().subscribe([job_channel(job_id)])
+            sub = get_event_bus().subscribe([channel])
         except Exception as e:
             yield (
                 "event: error\n"

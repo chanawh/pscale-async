@@ -45,6 +45,13 @@ class Job(Base):
     total_chunks = Column(Integer, nullable=True, default=0)
     chunks_completed = Column(Integer, nullable=True, default=0)
 
+    # Multi-cluster: which configured OneFS target this job belongs to
+    # (matches a "name" from ONEFS_TARGETS / ONEFS_TARGETS_FILE).
+    # NULL for upload/stream jobs (not cluster-scoped) and for jobs
+    # created before multi-cluster support -- both are treated as the
+    # default cluster.
+    cluster_name = Column(String(255), nullable=True, index=True)
+
     # Relationships
     incidents = relationship("Incident", back_populates="job")
 
