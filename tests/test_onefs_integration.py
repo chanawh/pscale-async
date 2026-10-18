@@ -7,9 +7,19 @@ from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
 from src.app.main import app
+from src.api.routers.auth import get_current_user
 from src.db.database import Base, SessionLocal, engine
 from src.models import Incident, Job, JobStatus, Node, Pattern
 from src.workers.log_processor import create_default_patterns, process_log_file
+
+# Auth is enforced on every route since the trust/safety baseline.
+# Router-level Depends(get_current_user) captures the function object at
+# import time, so this override (not @patch) is the working mechanism.
+# The return value is discarded at router level; it only needs to not raise.
+app.dependency_overrides[get_current_user] = lambda: {
+    "id": 1, "username": "test", "email": "test@test.com",
+    "is_active": True, "is_superuser": True,
+}
 
 client = TestClient(app)
 

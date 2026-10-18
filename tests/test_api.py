@@ -5,6 +5,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from src.app.main import app
+from src.api.routers.auth import get_current_user
 from src.db.database import get_db
 from src.models import Incident, Job, JobStatus, Node, Pattern, Severity, Status
 
@@ -13,6 +14,13 @@ from src.models import Incident, Job, JobStatus, Node, Pattern, Severity, Status
 def client(override_get_db):
     """Create test client"""
     app.dependency_overrides[get_db] = override_get_db
+    # Auth is enforced on every route since the trust/safety baseline:
+    # override it with a test user (return value is discarded at
+    # router level; the dependency only needs to not raise).
+    app.dependency_overrides[get_current_user] = lambda: {
+        "id": 1, "username": "test", "email": "test@test.com",
+        "is_active": True, "is_superuser": True,
+    }
     with TestClient(app) as test_client:
         yield test_client
     app.dependency_overrides.clear()
