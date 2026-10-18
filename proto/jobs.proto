@@ -1,0 +1,101 @@
+// JobService: typed streaming API over the domain event bus.
+//
+// The REST/SSE surface stays the simple path for browsers. This service is
+// for programmatic clients that want a typed contract, backpressure via
+// HTTP/2 flow control, and reconnect semantics without re-parsing text
+// frames. It consumes the SAME domain event bus (src/core/events.py) as
+// SSE -- no second event system.
+//
+// Auth: every RPC requires the same JWT bearer token the REST API uses,
+// passed as `authorization: Bearer <token>` gRPC metadata. The server
+// validates it with the identical jwt.decode + user-exists check as
+// get_current_user. Unauthenticated calls are rejected with
+// UNAUTHENTICATED before any subscription happens.
+//
+// Resume semantics (honest, not magic):
+//   - StreamJobEvents: the bus is pub/sub with no replay log, so resume
+//     means "snapshot + live". The server first sends a job.snapshot
+//     reflecting current DB state, then live events. If the job is already
+//     terminal it sends the terminal event immediately and closes.
+//     `from_sequence` is accepted and echoed: the terminal fast-path
+//     carries the final sequence so a reconnecting client can tell it has
+//     seen everything. Sequences are per-stream, starting at 1.
+//   - StreamIncidents: incidents ARE persisted, so this one genuinely
+//     replays: incidents with id > from_incident_id are sent first
+//     (0 = all committed so far), then live incident.created events.
+//     The stream ends when the job reaches a terminal state.
+syntax = "proto3";
+
+package pscale.v1;
+
+service JobService {
+  // All domain events for one job: snapshot, live progress/incidents,
+  // then a terminal event (completed/failed/cancelled) that ends the
+  // stream cleanly.
+  rpc StreamJobEvents(JobEventsRequest) returns (stream JobEvent);
+
+  // Incidents for one job as they are created, with DB-backed replay.
+  rpc StreamIncidents(IncidentStreamRequest) returns (stream Incident);
+}
+
+message JobEventsRequest {
+  string job_id = 1;
+  // Optional. When set it must match the job's own cluster_name, else
+  // INVALID_ARGUMENT -- the server, not the client, picks the channel.
+  string cluster_name = 2;
+  // Resume hint. See the file-level comment for what it does and does
+  // not guarantee.
+  int64 from_sequence = 3;
+}
+
+message IncidentStreamRequest {
+  string job_id = 1;
+  string cluster_name = 2; // same validation as JobEventsRequest
+  // Replay incidents with id strictly greater than this before going
+  // live. 0 replays everything committed so far.
+  int64 from_incident_id = 3;
+}
+
+// Flat by design: mirrors the JSON event dicts on the bus so the two
+// surfaces can't drift apart.
+message JobEvent {
+  int64 sequence = 1; // monotonic within this stream, starts at 1
+  // job.snapshot | job.progress | incident.created |
+  // job.completed | job.failed | job.cancelled
+  string type = 2;
+  string job_id = 3;
+
+  // job.progress
+  int32 progress = 4;
+  int32 chunks_completed = 5;
+  int32 total_chunks = 6;
+
+  // incident.created
+  Incident incident = 7;
+
+  // terminal events (completed/failed/cancelled)
+  JobSummary summary = 8;
+  // job.failed only
+  string error = 9;
+}
+
+message JobSummary {
+  string status = 1; // COMPLETED | FAILED | CANCELLED
+  int32 progress = 2;
+  string result_summary = 3; // JSON blob, identical to the REST field
+  string error_message = 4;
+}
+
+message Incident {
+  int64 id = 1;
+  string job_id = 2;
+  int32 pattern_id = 3;
+  string pattern_name = 4;
+  string severity = 5;
+  string title = 6;
+  string description = 7;
+  // -1 when the incident did not come from the chunked pipeline
+  // (legacy monolithic path).
+  int32 chunk_index = 8;
+  string created_at = 9; // RFC3339, empty when unknown
+}
