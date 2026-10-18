@@ -136,6 +136,27 @@ The **Async Log Intelligence API** is a production-ready REST API service design
 3. **Real-time Updates**: SSE endpoint streams job progress to frontend
 4. **Incident Management**: Users view/filter incidents, update status, track activity
 
+### Matching Engine
+
+Pattern matching is a single compiled alternation (`src/workers/matcher.py`):
+one `search()` per log line instead of one per pattern, branches ordered
+CRITICAL → HIGH → MEDIUM → LOW so the first match wins and one line yields
+one incident. User-supplied patterns are sanitized (their own `(?P<name>)`
+groups are neutralized to non-capturing) and patterns that fail to compile
+are skipped with a warning instead of failing the job.
+
+**Throughput (honest numbers):** on the 23-pattern default library with
+~18% of lines matching, the engine runs at roughly parity with the old
+per-pattern loop (~0.9x) — the old loop benefits from per-pattern
+literal-prefix fast search, while the alternation pays branching cost on
+non-matching lines. The engine pulls ahead as match rate rises (1.5x at
+50%, ~4x at 90%) because it stops at the first match instead of scanning
+all remaining patterns. The win here is semantic — severity-ordered single
+incident per line plus compile-time validation — not raw throughput.
+Methodology: `python3 scripts/bench_matcher.py` (synthetic lines, real
+23-pattern library, best-of-3); absolute lines/sec are machine-dependent,
+ratios are the comparable figure.
+
 ---
 
 ## 🛠️ Technology Stack

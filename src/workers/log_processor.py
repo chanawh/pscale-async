@@ -59,7 +59,6 @@ import io
 import json
 import logging
 import os
-import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -77,6 +76,7 @@ from src.core.storage import (
 from src.db.database import Base, SessionLocal
 from src.models import Incident, Job, JobStatus, Node, Pattern, Severity, Status
 from src.workers.chunking import compute_chunk_ranges, count_stream_lines
+from src.workers.matcher import compile_matcher, match_line
 
 # Setup logging
 logger = logging.getLogger(__name__)
@@ -257,6 +257,15 @@ def process_chunk(
             f"lines [{start_line}, {end_line})"
         )
 
+        # Single-pass engine, compiled from the fresh pattern read above:
+        # patterns are CRUD-edited at runtime, so never cache across chunks.
+        matcher = compile_matcher(patterns)
+        if matcher.skipped:
+            logger.warning(
+                f"Job {job_id} chunk {chunk_index}: skipped invalid patterns: "
+                f"{matcher.skipped}"
+            )
+
         incidents_created = 0
         lines_in_slice = 0
         matched_patterns = set()
@@ -273,33 +282,28 @@ def process_chunk(
                 if not line:
                     continue
 
-                # --- Pattern matching: behavior-identical to the monolithic
-                # task. (The single-pass engine is a separately queued
-                # change; this loop is intentionally untouched.)
-                for pattern in patterns:
-                    try:
-                        if re.search(pattern.regex_pattern, line, re.IGNORECASE):
-                            # Create incident
-                            incident = Incident(
-                                title=f"Pattern Match: {pattern.name}",
-                                description=pattern.description
-                                or f"Log line matched pattern: {pattern.name}",
-                                severity=map_severity(pattern.severity_level),
-                                status=Status.OPEN,
-                                raw_log=line,
-                                node_id=node_id,
-                                pattern_id=pattern.id,
-                                job_id=job_id,
-                                chunk_index=chunk_index,
-                            )
-                            db.add(incident)
-                            incidents_created += 1
-                            matched_patterns.add(pattern.name)
-
-                    except re.error as e:
-                        # Log regex error but continue processing
-                        logger.error(f"Regex error in pattern {pattern.name}: {e}")
-                        continue
+                # --- Pattern matching: single-pass engine, one search per
+                # line. First match wins by severity rank (CRITICAL first);
+                # invalid patterns were skipped at compile time with a
+                # warning (see compile_matcher).
+                winner = match_line(matcher, line)
+                if winner is not None:
+                    # Create incident
+                    incident = Incident(
+                        title=f"Pattern Match: {winner.name}",
+                        description=winner.description
+                        or f"Log line matched pattern: {winner.name}",
+                        severity=map_severity(winner.severity_level),
+                        status=Status.OPEN,
+                        raw_log=line,
+                        node_id=node_id,
+                        pattern_id=winner.id,
+                        job_id=job_id,
+                        chunk_index=chunk_index,
+                    )
+                    db.add(incident)
+                    incidents_created += 1
+                    matched_patterns.add(winner.name)
 
         db.commit()
 
@@ -540,38 +544,42 @@ def process_log_file(
         logger.info(f"Processing job {job_id}: Found {len(patterns)} active patterns")
         logger.info(f"Processing job {job_id}: File has {total_lines} lines")
 
+        # Single-pass engine, compiled from the fresh pattern read above.
+        matcher = compile_matcher(patterns)
+        if matcher.skipped:
+            logger.warning(
+                f"Processing job {job_id}: skipped invalid patterns: "
+                f"{matcher.skipped}"
+            )
+        matched_pattern_names = set()
+
         # Process each line
         for i, line in enumerate(lines):
             line = line.strip()
             if not line:
                 continue
 
-            # Check against each pattern
-            for pattern in patterns:
-                try:
-                    if re.search(pattern.regex_pattern, line, re.IGNORECASE):
-                        # Create incident
-                        incident = Incident(
-                            title=f"Pattern Match: {pattern.name}",
-                            description=pattern.description
-                            or f"Log line matched pattern: {pattern.name}",
-                            severity=map_severity(pattern.severity_level),
-                            status=Status.OPEN,
-                            raw_log=line,
-                            node_id=node.id if node else None,
-                            pattern_id=pattern.id,
-                            job_id=job_id,
-                        )
-                        db.add(incident)
-                        incidents_created += 1
-                        logger.info(
-                            f"Created incident {incidents_created} for pattern '{pattern.name}' on line: {line[:50]}..."
-                        )
-
-                except re.error as e:
-                    # Log regex error but continue processing
-                    logger.error(f"Regex error in pattern {pattern.name}: {e}")
-                    continue
+            # Single-pass match: first win by severity rank (CRITICAL first).
+            winner = match_line(matcher, line)
+            if winner is not None:
+                # Create incident
+                incident = Incident(
+                    title=f"Pattern Match: {winner.name}",
+                    description=winner.description
+                    or f"Log line matched pattern: {winner.name}",
+                    severity=map_severity(winner.severity_level),
+                    status=Status.OPEN,
+                    raw_log=line,
+                    node_id=node.id if node else None,
+                    pattern_id=winner.id,
+                    job_id=job_id,
+                )
+                db.add(incident)
+                incidents_created += 1
+                matched_pattern_names.add(winner.name)
+                logger.info(
+                    f"Created incident {incidents_created} for pattern '{winner.name}' on line: {line[:50]}..."
+                )
 
             processed_lines += 1
 
@@ -605,16 +613,11 @@ def process_log_file(
                 "total_lines": total_lines,
                 "processed_lines": processed_lines,
                 "incidents_created": incidents_created,
-                "patterns_matched": len(
-                    [
-                        p
-                        for p in patterns
-                        if any(
-                            re.search(p.regex_pattern, line, re.IGNORECASE)
-                            for line in lines
-                        )
-                    ]
-                ),
+                # Winners tracked during the single pass above; the old code
+                # re-scanned every pattern over every line here (O(P*L)).
+                # Shape unchanged (int); semantics now count patterns that
+                # won at least one line under first-match-wins.
+                "patterns_matched": len(matched_pattern_names),
             }
         )
 
