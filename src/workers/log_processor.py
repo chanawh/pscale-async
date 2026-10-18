@@ -251,6 +251,85 @@ def fanout_process_log(self, job_id, storage_ref, node_hostname=None, descriptio
 
 
 @celery_app.task(bind=True, max_retries=3)
+def ingest_cluster_log(self, job_id, log_path, node_hostname=None, description=None):
+    """Fetch a log file from the OneFS cluster over SSH and queue it.
+
+    Request handlers never do this work: the API validates ``log_path``,
+    creates the job row, and enqueues this task with a 202 response. The
+    worker fetches the file, streams it into the storage backend, records
+    the content reference on the job, and delegates to
+    ``fanout_process_log`` -- the same chunked pipeline uploads go through.
+    """
+    from src.core.storage import build_object_key
+    from src.onefs.client import OneFSClient, validate_log_path
+
+    db = SessionLocal()
+    try:
+        job, db = _get_job_or_raise(db, job_id)
+
+        # Defense in depth: the endpoint validated this, but task args can
+        # originate anywhere. Never let an unvalidated path reach SSH.
+        try:
+            safe_path = validate_log_path(log_path, settings.onefs_log_dir)
+        except ValueError as e:
+            raise Exception(f"Invalid log_path rejected: {e}")
+
+        job.status = JobStatus.PROCESSING
+        db.commit()
+
+        client = OneFSClient()
+        try:
+            log_content = client.get_log_file(safe_path)
+        except Exception as e:
+            raise Exception(f"SSH fetch of {safe_path} failed: {e}")
+
+        if not log_content or not log_content.strip():
+            raise Exception(f"No log content returned from {safe_path}")
+
+        # Into the storage backend -- never a local path across the
+        # process boundary (see 673f96e).
+        backend = backend_from_settings(settings)
+        object_key = build_object_key(
+            job_id, f"cluster_{safe_path.strip('/').replace('/', '_')}.log"
+        )
+        payload = log_content.encode("utf-8", errors="ignore")
+        ref = backend.put_stream(object_key, io.BytesIO(payload))
+
+        job.storage_backend = ref.backend
+        job.storage_bucket = ref.bucket
+        job.storage_key = ref.key
+        job.file_size = len(payload)
+        db.commit()
+
+        logger.info(f"Cluster job {job_id}: fetched {safe_path} -> {ref}")
+
+        # Hand off to the standard pipeline; the chord finalizer owns the
+        # terminal job state from here.
+        fanout_process_log.delay(
+            job_id=job_id,
+            storage_ref=ref.to_dict(),
+            node_hostname=node_hostname or "onefs-cluster",
+            description=description or f"OneFS cluster log: {safe_path}",
+        )
+        return {"status": "queued", "job_id": job_id, "storage_ref": ref.to_dict()}
+    except Exception as e:
+        logger.error(f"Cluster ingest job {job_id} failed before fan-out: {e}")
+        try:
+            job = db.query(Job).filter(Job.id == job_id).first()
+            if job:
+                job.status = JobStatus.FAILED
+                job.error_message = str(e)
+                job.completed_at = datetime.utcnow()
+                db.commit()
+                emit_job_failed(job_id=job_id, error=job.error_message, summary=None)
+        except Exception as db_error:
+            logger.error(f"Could not mark job {job_id} failed: {db_error}")
+        raise
+    finally:
+        db.close()
+
+
+@celery_app.task(bind=True, max_retries=3)
 def process_chunk(
     self, job_id, chunk_index, storage_ref, start_line, end_line, node_id=None
 ):

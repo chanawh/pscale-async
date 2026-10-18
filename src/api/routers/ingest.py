@@ -22,8 +22,8 @@ from src.core.storage import (
 from src.db.database import get_db
 from src.api.routers.auth import get_current_user
 from src.models import Job, JobStatus, Node
-from src.onefs.client import OneFSClient, validate_log_path
-from src.workers.log_processor import process_log_file
+from src.onefs.client import validate_log_path
+from src.workers.log_processor import ingest_cluster_log, process_log_file
 
 router = APIRouter(tags=["ingestion"], dependencies=[Depends(get_current_user)])
 
@@ -37,79 +37,6 @@ class LogStreamRequest(BaseModel):
     description: Optional[str] = None
 
 
-def process_cluster_logs_background(job_id: str, log_path: str, node_hostname: Optional[str], description: Optional[str]):
-    """Process cluster logs in background thread"""
-    from src.db.database import SessionLocal
-    
-    db = SessionLocal()
-    try:
-        # Get the job
-        job = db.query(Job).filter(Job.id == job_id).first()
-        if not job:
-            logger.error(f"Background job {job_id} not found")
-            return
-        
-        # Update status to processing
-        job.status = JobStatus.PROCESSING
-        db.commit()
-        
-        # Fetch logs from cluster
-        onefs_client = OneFSClient()
-        log_content = onefs_client.get_log_file(log_path)
-        
-        # Split into lines
-        log_lines = [line.strip() for line in log_content.split("\n") if line.strip()]
-        
-        # Update job size
-        job.file_size = len(log_content)
-        db.commit()
-        
-        if not log_lines:
-            job.status = JobStatus.FAILED
-            job.error_message = f"No log content found at {log_path}"
-            db.commit()
-            return
-        
-        # Process logs via Celery task (runs synchronously with task_always_eager=True)
-        try:
-            task = process_log_file.delay(
-                job_id=job_id,
-                log_lines=log_lines,
-                node_hostname=node_hostname or "onefs-cluster",
-                description=description or f"OneFS cluster log: {log_path}",
-            )
-            result = task.get() if task.ready() else {"incidents_created": 0}
-        except Exception as task_error:
-            logger.error(f"Task failed for job {job_id}: {task_error}")
-            result = process_log_file.run(
-                job_id=job_id,
-                log_lines=log_lines,
-                node_hostname=node_hostname or "onefs-cluster",
-                description=description or f"OneFS cluster log: {log_path}",
-            )
-        
-        # Update job to completed
-        job.status = JobStatus.COMPLETED
-        job.completed_at = datetime.utcnow()
-        job.progress = 100
-        job.result_summary = json.dumps({
-            "total_lines": len(log_lines),
-            "processed_lines": len(log_lines),
-            "incidents_created": result.get("incidents_created", 0),
-        })
-        db.commit()
-        
-        logger.info(f"Background job {job_id} completed: {result}")
-        
-    except Exception as e:
-        logger.error(f"Background job {job_id} failed: {e}")
-        job = db.query(Job).filter(Job.id == job_id).first()
-        if job:
-            job.status = JobStatus.FAILED
-            job.error_message = str(e)
-            db.commit()
-    finally:
-        db.close()
 
 
 def detect_onefs_format(log_content: str) -> bool:
@@ -554,7 +481,7 @@ def ingest_log_stream(
         )
 
 
-@router.post("/ingest/cluster", summary="Ingest logs from OneFS cluster via tunnel")
+@router.post("/ingest/cluster", summary="Ingest logs from OneFS cluster via tunnel", status_code=202)
 def ingest_cluster_logs(
     log_path: str = "/var/log/messages",
     node_hostname: Optional[str] = None,
@@ -562,106 +489,60 @@ def ingest_cluster_logs(
     db: Session = Depends(get_db),
 ):
     """
-    Fetch and process logs directly from OneFS cluster via SSH tunnel.
+    Queue a log fetch from the OneFS cluster via SSH tunnel.
 
     - **log_path**: Path to log file on OneFS cluster (default: /var/log/messages)
     - **node_hostname**: Optional hostname for the source node
     - **description**: Optional description of the ingestion
 
-    Returns a job ID for tracking processing progress.
+    Validates ``log_path``, creates the job, enqueues the fetch + process
+    pipeline, and returns **202 Accepted** immediately with the job id.
+    Request handlers never do the work — a Celery worker fetches the file
+    over SSH, streams it into the storage backend, and fans out the
+    chunked processing pipeline. Poll ``/api/v1/jobs/{job_id}`` or
+    subscribe to ``/api/v1/jobs/{job_id}/events`` for progress.
 
     Requires authentication. ``log_path`` is strictly validated: it must be an
     absolute path under ONEFS_LOG_DIR (default /var/log) with no shell
     metacharacters or ``..`` segments — anything else is rejected with 400.
     """
-    import os
-
     try:
-        log_path = validate_log_path(log_path, settings.onefs_log_dir)
+        safe_path = validate_log_path(log_path, settings.onefs_log_dir)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=f"Invalid log_path: {e}")
 
-    # Create job
     job_id = str(uuid.uuid4())
     job = Job(
         id=job_id,
-        filename=f"cluster_{log_path.replace('/', '_')}",
+        filename=f"cluster_{safe_path.strip('/').replace('/', '_')}",
         file_size=0,
-        status=JobStatus.PROCESSING,  # Start as processing since we do it synchronously
-        description=description or f"OneFS cluster log: {log_path}",
+        status=JobStatus.PENDING,
+        description=description or f"OneFS cluster log: {safe_path}",
     )
     db.add(job)
     db.commit()
     db.refresh(job)
 
     try:
-        # Fetch logs from cluster synchronously
-        onefs_client = OneFSClient()
-        log_content = onefs_client.get_log_file(log_path)
-        
-        # Split into lines
-        log_lines = [line.strip() for line in log_content.split("\n") if line.strip()]
-        
-        # Update job size
-        job.file_size = len(log_content)
-        db.commit()
-        
-        if not log_lines:
-            job.status = JobStatus.FAILED
-            job.error_message = f"No log content found at {log_path}"
-            db.commit()
-            return {
-                "job_id": job_id,
-                "status": "failed",
-                "message": f"No log content found at {log_path}",
-            }
-        
-        # Process logs via Celery task (runs synchronously with task_always_eager=True)
-        try:
-            task = process_log_file.delay(
-                job_id=job_id,
-                log_lines=log_lines,
-                node_hostname=node_hostname or "onefs-cluster",
-                description=description or f"OneFS cluster log: {log_path}",
-            )
-            result = task.get() if task.ready() else {"incidents_created": 0}
-        except Exception as task_error:
-            logger.error(f"Task failed for job {job_id}: {task_error}")
-            result = process_log_file.run(
-                job_id=job_id,
-                log_lines=log_lines,
-                node_hostname=node_hostname or "onefs-cluster",
-                description=description or f"OneFS cluster log: {log_path}",
-            )
-        
-        # Update job to completed
-        job.status = JobStatus.COMPLETED
-        job.completed_at = datetime.utcnow()
-        job.progress = 100
-        job.result_summary = json.dumps({
-            "total_lines": len(log_lines),
-            "processed_lines": len(log_lines),
-            "incidents_created": result.get("incidents_created", 0),
-        })
-        db.commit()
-        
-        logger.info(f"Cluster job {job_id} completed: {result}")
-        
-        return {
-            "job_id": job_id,
-            "status": "completed",
-            "message": f"Successfully processed {len(log_lines)} lines from {log_path}",
-            "result": result,
-        }
-        
-    except Exception as e:
-        logger.error(f"Cluster job {job_id} failed: {e}")
-        job.status = JobStatus.FAILED
-        job.error_message = str(e)
-        db.commit()
-        
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to ingest logs from cluster: {str(e)}"
+        task = ingest_cluster_log.delay(
+            job_id=job_id,
+            log_path=safe_path,
+            node_hostname=node_hostname,
+            description=description,
         )
+    except Exception as e:
+        # Broker unreachable: don't fail open by doing the work inline —
+        # mark the job failed so the state is honest.
+        logger.error(f"Could not enqueue cluster ingest for job {job_id}: {e}")
+        job.status = JobStatus.FAILED
+        job.error_message = f"Task queue unavailable: {e}"
+        db.commit()
+        raise HTTPException(status_code=503, detail="Task queue unavailable; try again shortly")
 
+    logger.info(f"Cluster ingest queued: job {job_id}, path {safe_path}, task {task.id}")
+    return {
+        "job_id": job_id,
+        "status": "queued",
+        "message": f"Cluster log fetch queued for {safe_path}",
+        "celery_task_id": task.id,
+    }
