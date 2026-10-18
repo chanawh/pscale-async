@@ -175,6 +175,18 @@ existing single-cluster setups behave exactly as before.
 - SSH clients are pooled per cluster in a thread-safe registry
   (`src/onefs/registry.py`); each target carries its own `log_dir` used
   for path validation.
+- Cluster ingest also runs a **best-effort Platform API pre-flight**:
+  `src/onefs/platform_api.py` opens a session (`POST /session/1/session`),
+  reads `GET /platform/3/cluster/identity` and `/platform/3/cluster/nodes`,
+  and stamps the job description with the cluster name/version/node count.
+  If the Platform API is unreachable or rejects auth, ingest continues over
+  **SSH** — there is no documented Platform API endpoint that serves raw
+  `/var/log/*` file contents, so SSH stays the log transport by design.
+  Structured cluster events (`GET /platform/16/event/eventgroup-occurrences`,
+  `GET /platform/16/event/eventgroup-definitions`) are the client-supported
+  API-native incident source; wiring them into the pipeline is a future
+  step. All endpoints used are documented in the Dell OneFS 9.5.0.0 API
+  Reference Guide — see the module docstring for the inventory.
 
 ```yaml
 # docker-compose.yml (two clusters)

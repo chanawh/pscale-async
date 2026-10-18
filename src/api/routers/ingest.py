@@ -23,6 +23,7 @@ from src.db.database import get_db
 from src.api.routers.auth import get_current_user
 from src.models import Job, JobStatus, Node
 from src.onefs.client import validate_log_path
+from src.onefs.platform_api import PlatformAPIClient, PlatformAPIError
 from src.onefs.targets import ClusterNotFoundError, resolve_target
 from src.workers.log_processor import ingest_cluster_log, process_log_file
 
@@ -523,13 +524,40 @@ def ingest_cluster_logs(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=f"Invalid log_path: {e}")
 
+    # Best-effort Platform API pre-flight: confirm the cluster's identity
+    # and node inventory over the documented REST API before queueing.
+    # Never blocks the 202 -- SSH remains the log transport and the
+    # fallback when the Platform API is unreachable or rejects auth.
+    cluster_blurb = ""
+    papi_client = PlatformAPIClient(target)
+    try:
+        identity = papi_client.cluster_identity()
+        nodes = papi_client.cluster_nodes().get("nodes", [])
+        node_count = len(nodes) if isinstance(nodes, list) else "?"
+        cluster_blurb = (
+            f" [{identity.get('name', target['name'])}"
+            f" {identity.get('version', 'OneFS ?')}, {node_count} nodes]"
+        )
+        logger.info(
+            "Platform API pre-flight OK for cluster '%s': %s",
+            target["name"], cluster_blurb.strip(" []"),
+        )
+    except PlatformAPIError as e:
+        logger.warning(
+            "Platform API pre-flight failed for cluster '%s' "
+            "(continuing with SSH log transport): %s",
+            target["name"], e,
+        )
+    finally:
+        papi_client.close()
+
     job_id = str(uuid.uuid4())
     job = Job(
         id=job_id,
         filename=f"cluster_{safe_path.strip('/').replace('/', '_')}",
         file_size=0,
         status=JobStatus.PENDING,
-        description=description or f"OneFS cluster log: {safe_path}",
+        description=(description or f"OneFS cluster log: {safe_path}") + cluster_blurb,
         cluster_name=target["name"],
     )
     db.add(job)
