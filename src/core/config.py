@@ -23,6 +23,15 @@ class Settings(BaseSettings):
     # Redis
     redis_url: str = "redis://redis:6379/0"
 
+    # Domain event bus (Redis pub/sub) for job/incident events. The SSE
+    # endpoint subscribes instead of polling the DB every second.
+    #   "redis":  redis-py pub/sub against redis_url (above) — required
+    #             when the API and Celery workers run in separate
+    #             containers, since events must cross process boundaries.
+    #   "memory": process-local fan-out. Tests and single-process dev
+    #             only; workers in other processes won't see these events.
+    event_bus: str = "redis"
+
     # Celery
     celery_broker_url: str = "redis://redis:6379/0"
     celery_result_backend: str = "redis://redis:6379/0"

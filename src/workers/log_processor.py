@@ -68,6 +68,12 @@ from sqlalchemy.orm import Session
 
 from src.core.celery import celery_app
 from src.core.config import settings
+from src.core.events import (
+    emit_incident_created,
+    emit_job_completed,
+    emit_job_failed,
+    emit_job_progress,
+)
 from src.core.storage import (
     StorageReference,
     backend_from_settings,
@@ -155,22 +161,24 @@ def fanout_process_log(self, job_id, storage_ref, node_hostname=None, descriptio
         if not ranges:
             # Empty file: complete directly. A zero-task chord has
             # backend-dependent semantics, so never dispatch one.
+            summary = {
+                "total_lines": 0,
+                "processed_lines": 0,
+                "incidents_created": 0,
+                "patterns_matched": [],
+                "total_chunks": 0,
+                "failed_chunks": [],
+            }
             job.status = JobStatus.COMPLETED
             job.completed_at = datetime.utcnow()
             job.progress = 100
             job.total_chunks = 0
             job.chunks_completed = 0
-            job.result_summary = json.dumps(
-                {
-                    "total_lines": 0,
-                    "processed_lines": 0,
-                    "incidents_created": 0,
-                    "patterns_matched": [],
-                    "total_chunks": 0,
-                    "failed_chunks": [],
-                }
-            )
+            job.result_summary = json.dumps(summary)
             db.commit()
+            # Terminal event so SSE subscribers see completion even though
+            # no chord finalizer runs for this path.
+            emit_job_completed(job_id=job_id, summary=summary)
             logger.info(f"Job {job_id}: empty upload, completed with 0 chunks")
             return {
                 "status": "completed",
@@ -218,6 +226,9 @@ def fanout_process_log(self, job_id, storage_ref, node_hostname=None, descriptio
                 job.error_message = f"fan-out failed: {str(e)}"
                 job.completed_at = datetime.utcnow()
                 db.commit()
+                emit_job_failed(
+                    job_id=job_id, error=job.error_message, summary=None
+                )
         except Exception as db_error:
             logger.error(f"Could not mark job {job_id} failed: {db_error}")
         # Re-raise: in eager/dev mode the API's fallback then processes the
@@ -269,6 +280,8 @@ def process_chunk(
         incidents_created = 0
         lines_in_slice = 0
         matched_patterns = set()
+        # (incident, pattern_name) pairs for event emission after commit.
+        created_incidents = []
 
         with backend.open_stream(ref) as stream:
             text = io.TextIOWrapper(stream, encoding="utf-8", errors="ignore")
@@ -302,10 +315,31 @@ def process_chunk(
                         chunk_index=chunk_index,
                     )
                     db.add(incident)
+                    created_incidents.append((incident, winner.name))
                     incidents_created += 1
                     matched_patterns.add(winner.name)
 
+        # Flush first so ids are assigned without triggering N refresh
+        # SELECTs after commit expiry; capture the event payloads now, then
+        # publish only after the commit lands, so events never describe
+        # rolled-back rows. Publishing is best-effort (see events.py).
+        db.flush()
+        pending_events = [
+            {
+                "incident_id": inc.id,
+                "pattern_id": inc.pattern_id,
+                "pattern_name": name,
+                "severity": inc.severity.value,
+            }
+            for inc, name in created_incidents
+        ]
         db.commit()
+        for payload in pending_events:
+            emit_incident_created(
+                job_id=job_id,
+                chunk_index=chunk_index,
+                **payload,
+            )
 
         # --- Progress: atomic increment, safe under concurrent chunks. ---
         db.execute(
@@ -315,9 +349,16 @@ def process_chunk(
         )
         db.commit()
         job = db.query(Job).filter(Job.id == job_id).first()
-        if job and job.total_chunks:
-            job.progress = int((job.chunks_completed or 0) / job.total_chunks * 100)
-            db.commit()
+        if job:
+            if job.total_chunks:
+                job.progress = int((job.chunks_completed or 0) / job.total_chunks * 100)
+                db.commit()
+            emit_job_progress(
+                job_id=job_id,
+                chunks_completed=job.chunks_completed or 0,
+                total_chunks=job.total_chunks or 0,
+                progress=job.progress or 0,
+            )
 
         # Per-chunk Celery state replaces the old per-100-lines updates.
         try:
@@ -423,6 +464,14 @@ def finalize_job(self, chunk_results, job_id):
             )
 
         db.commit()
+        # Terminal domain event for SSE subscribers. Best-effort: a down
+        # event bus must not break finalization.
+        if failed:
+            emit_job_failed(
+                job_id=job_id, error=job.error_message or "", summary=summary
+            )
+        else:
+            emit_job_completed(job_id=job_id, summary=summary)
         return {"job_id": job_id, "status": job.status.value, **summary}
     except Exception as e:
         logger.error(f"Job {job_id} finalize failed: {str(e)}")
@@ -524,6 +573,10 @@ def process_log_file(
         total_lines = len(lines)
         processed_lines = 0
         incidents_created = 0
+        # (incident, pattern_name) pairs; published at each commit point so
+        # SSE subscribers see incidents as the legacy path progresses.
+        created_incidents = []
+        published_incidents = 0
 
         # Get or create node
         node = None
@@ -575,6 +628,7 @@ def process_log_file(
                     job_id=job_id,
                 )
                 db.add(incident)
+                created_incidents.append((incident, winner.name))
                 incidents_created += 1
                 matched_pattern_names.add(winner.name)
                 logger.info(
@@ -602,30 +656,54 @@ def process_log_file(
                 except Exception as celery_error:
                     logger.warning(f"Could not update Celery state: {celery_error}")
 
+                # Flush to assign ids, then publish incident events only
+                # after the commit lands (never describe rolled-back rows).
+                # chunk_index=None: this is the legacy monolithic path.
+                db.flush()
+                pending = [
+                    {
+                        "incident_id": inc.id,
+                        "pattern_id": inc.pattern_id,
+                        "pattern_name": name,
+                        "severity": inc.severity.value,
+                    }
+                    for inc, name in created_incidents[published_incidents:]
+                ]
+                published_incidents = len(created_incidents)
                 db.commit()
+                for payload in pending:
+                    emit_incident_created(
+                        job_id=job_id, chunk_index=None, **payload
+                    )
+                emit_job_progress(
+                    job_id=job_id,
+                    chunks_completed=0,
+                    total_chunks=0,
+                    progress=progress,
+                )
 
         # Update job status
         job.status = JobStatus.COMPLETED
         job.completed_at = datetime.utcnow()
         job.progress = 100
-        job.result_summary = json.dumps(
-            {
-                "total_lines": total_lines,
-                "processed_lines": processed_lines,
-                "incidents_created": incidents_created,
-                # Winners tracked during the single pass above; the old code
-                # re-scanned every pattern over every line here (O(P*L)).
-                # Shape unchanged (int); semantics now count patterns that
-                # won at least one line under first-match-wins.
-                "patterns_matched": len(matched_pattern_names),
-            }
-        )
+        summary = {
+            "total_lines": total_lines,
+            "processed_lines": processed_lines,
+            "incidents_created": incidents_created,
+            # Winners tracked during the single pass above; the old code
+            # re-scanned every pattern over every line here (O(P*L)).
+            # Shape unchanged (int); semantics now count patterns that
+            # won at least one line under first-match-wins.
+            "patterns_matched": len(matched_pattern_names),
+        }
+        job.result_summary = json.dumps(summary)
 
         logger.info(
             f"Job {job_id} completed: Created {incidents_created} incidents from {total_lines} lines"
         )
 
         db.commit()
+        emit_job_completed(job_id=job_id, summary=summary)
 
         # Clean up the legacy local temp file. Objects fetched via a
         # storage reference are intentionally kept: the stored object is the
@@ -650,6 +728,7 @@ def process_log_file(
             job.error_message = str(e)
             job.completed_at = datetime.utcnow()
             db.commit()
+            emit_job_failed(job_id=job_id, error=str(e), summary=None)
 
         # Clean up the legacy local temp file. Objects fetched via a
         # storage reference are intentionally kept: the stored object is the

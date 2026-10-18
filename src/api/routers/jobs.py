@@ -7,7 +7,8 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from src.core.celery import celery_app
-from src.db.database import get_db
+from src.core.events import get_event_bus, job_channel
+from src.db.database import SessionLocal, get_db
 from src.api.routers.auth import get_current_user
 from src.models import Job, JobStatus
 
@@ -164,53 +165,95 @@ async def cancel_job(job_id: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail=f"Failed to cancel job: {str(e)}")
 
 
-@router.get("/api/v1/jobs/{job_id}/events", summary="Get job progress events (SSE)")
+# NOTE: this router is mounted with prefix "/api/v1" (see src/app/main.py),
+# so the path below must NOT repeat the prefix — the old "/api/v1/..." here
+# produced the double-prefixed "/api/v1/api/v1/jobs/{id}/events" that 404'd
+# the frontend. The old polling endpoint never worked, so replacing it is
+# safe; see the commit message.
+@router.get("/jobs/{job_id}/events", summary="Job progress events (SSE)")
 async def job_events(job_id: str, db: Session = Depends(get_db)):
     """
-    Server-Sent Events endpoint for real-time job progress updates.
+    Server-Sent Events over the Redis pub/sub domain event bus.
 
-    Streams job status and progress every 1 second until job completes or fails.
+    Subscribes to ``job:{job_id}`` instead of polling the database every
+    second per client. Emits the current snapshot first, then live
+    ``progress`` / ``incident`` events, then a terminal ``complete`` event.
+    A ``: ping`` heartbeat comment is sent every 20s so idle connections
+    are not killed by proxies during long jobs.
     """
+    job = db.query(Job).filter(Job.id == job_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    snapshot = {
+        "id": job.id,
+        "status": job.status.value,
+        "progress": job.progress or 0,
+    }
+    terminal = job.status in (JobStatus.COMPLETED, JobStatus.FAILED)
+    db.close()
 
-    async def event_generator():
-        while True:
-            # Get fresh job data
-            job = db.query(Job).filter(Job.id == job_id).first()
-
-            if not job:
-                yield f"event: error\ndata: {json.dumps({'error': 'Job not found'})}\n\n"
-                break
-
-            # Build event data
-            event_data = {
-                "id": job.id,
-                "status": job.status.value,
-                "progress": job.progress,
-                "result_summary": job.result_summary,
-                "error_message": job.error_message,
-                "started_at": job.started_at.isoformat() if job.started_at else None,
+    def _full_snapshot() -> dict:
+        """One fresh DB read for the terminal state (not per-second)."""
+        session = SessionLocal()
+        try:
+            j = session.query(Job).filter(Job.id == job_id).first()
+            if not j:
+                return {"id": job_id, "error": "Job not found"}
+            return {
+                "id": j.id,
+                "status": j.status.value,
+                "progress": j.progress or 0,
+                "result_summary": j.result_summary,
+                "error_message": j.error_message,
+                "started_at": j.started_at.isoformat() if j.started_at else None,
                 "completed_at": (
-                    job.completed_at.isoformat() if job.completed_at else None
+                    j.completed_at.isoformat() if j.completed_at else None
                 ),
             }
+        finally:
+            session.close()
 
-            # Add Celery task info if available
-            try:
-                task_result = celery_app.AsyncResult(job_id)
-                event_data["celery_status"] = task_result.status
-            except Exception:
-                pass
+    async def event_generator():
+        # Already terminal: one snapshot + complete, no subscription needed.
+        if terminal:
+            yield f"event: progress\ndata: {json.dumps(snapshot)}\n\n"
+            yield f"event: complete\ndata: {json.dumps(_full_snapshot())}\n\n"
+            return
 
-            # Send event
-            yield f"event: progress\ndata: {json.dumps(event_data)}\n\n"
+        try:
+            sub = get_event_bus().subscribe([job_channel(job_id)])
+        except Exception as e:
+            yield (
+                "event: error\n"
+                f"data: {json.dumps({'error': f'event bus unavailable: {e}'})}\n\n"
+            )
+            return
 
-            # Stop if job is done
-            if job.status in [JobStatus.COMPLETED, JobStatus.FAILED]:
-                yield f"event: complete\ndata: {json.dumps(event_data)}\n\n"
-                break
-
-            # Wait before next update
-            await asyncio.sleep(1)
+        try:
+            yield f"event: progress\ndata: {json.dumps(snapshot)}\n\n"
+            while True:
+                # Blocking get() runs in a thread so the event loop stays
+                # free; None means the 20s heartbeat window elapsed.
+                msg = await asyncio.to_thread(sub.get, 20.0)
+                if msg is None:
+                    yield ": ping\n\n"
+                    continue
+                _channel, event = msg
+                etype = event.get("type")
+                if etype == "job.progress":
+                    # A job emitting progress is processing by definition.
+                    yield (
+                        "event: progress\n"
+                        f"data: {json.dumps({'id': job_id, 'status': 'PROCESSING', 'progress': event.get('progress', 0)})}\n\n"
+                    )
+                elif etype == "incident.created":
+                    yield f"event: incident\ndata: {json.dumps(event)}\n\n"
+                elif etype in ("job.completed", "job.failed"):
+                    yield f"event: complete\ndata: {json.dumps(_full_snapshot())}\n\n"
+                    break
+                # Unknown event types are ignored (forward-compatible).
+        finally:
+            sub.close()
 
     return StreamingResponse(
         event_generator(),
