@@ -43,6 +43,13 @@ export function StatusBadge({ status, size = 'md', showIcon = true }: StatusBadg
           icon: Clock,
           iconColor: 'text-yellow-500'
         }
+      case 'CANCELLED':
+        return {
+          bgColor: 'bg-gray-200',
+          textColor: 'text-gray-700',
+          icon: XCircle,
+          iconColor: 'text-gray-500'
+        }
       case 'DEGRADED':
       case 'ESCALATED':
         return {

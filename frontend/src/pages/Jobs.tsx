@@ -5,7 +5,6 @@ import { apiService } from '@/services/api'
 import {
   RefreshCw,
   Upload,
-  Trash2,
   Eye,
   ChevronDown,
   ChevronUp,
@@ -13,7 +12,8 @@ import {
   XCircle,
   Play,
   Clock,
-  FileText
+  FileText,
+  Server
 } from 'lucide-react'
 import toast from 'react-hot-toast'
 import { Job } from '@/types'
@@ -21,6 +21,9 @@ import { StatusBadge } from '@/components/StatusBadge'
 import { ProgressBar } from '@/components/ProgressBar'
 import { SearchInput } from '@/components/SearchInput'
 import { EmptyState } from '@/components/EmptyState'
+import { ClusterPicker } from '@/components/ClusterPicker'
+import { CancelJobButton } from '@/components/CancelJobButton'
+import { useClusters } from '@/hooks/useClusters'
 import { useJobEvents } from '@/hooks/useJobEvents'
 import { FileUpload, FilePreview } from '@/components/FileUpload'
 
@@ -29,6 +32,7 @@ export function Jobs() {
   
   const [filters, setFilters] = useState({
     status: '',
+    cluster: '',
     limit: 20,
     skip: 0
   })
@@ -40,6 +44,7 @@ export function Jobs() {
   const [sseJobId, setSseJobId] = useState<string | null>(null)
 
   const queryClient = useQueryClient()
+  const { clusters } = useClusters()
 
   // SSE real-time updates for active job
   const { isConnected: sseConnected } = useJobEvents(sseJobId, {
@@ -74,17 +79,8 @@ export function Jobs() {
     staleTime: 1000 * 60 * 2,
   })
 
-  // Cancel job mutation
-  const cancelJobMutation = useMutation({
-    mutationFn: (jobId: string) => apiService.cancelJob(jobId),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['jobs'] })
-      toast.success('Job cancelled successfully')
-    },
-    onError: () => {
-      toast.error('Failed to cancel job')
-    }
-  })
+  // Job cancellation is owned by <CancelJobButton/> (confirm-then-cancel
+  // with honest 404/409/422/503 states) — no local mutation needed.
 
   // Normalize jobs data - handle different response structures
   const jobs: Job[] = (() => {
@@ -102,12 +98,6 @@ export function Jobs() {
     job.filename.toLowerCase().includes(searchTerm.toLowerCase()) ||
     job.id.toLowerCase().includes(searchTerm.toLowerCase())
   )
-
-  const handleCancelJob = (jobId: string) => {
-    if (window.confirm('Are you sure you want to cancel this job?')) {
-      cancelJobMutation.mutate(jobId)
-    }
-  }
 
   const handleViewDetails = (job: Job) => {
     setSelectedJob(job)
@@ -209,7 +199,14 @@ export function Jobs() {
               <option value="PROCESSING">Processing</option>
               <option value="COMPLETED">Completed</option>
               <option value="FAILED">Failed</option>
+              <option value="CANCELLED">Cancelled</option>
             </select>
+            <ClusterPicker
+              label={false}
+              clusters={clusters}
+              value={filters.cluster}
+              onChange={(cluster) => setFilters({ ...filters, cluster, skip: 0 })}
+            />
             <select
               value={filters.limit}
               onChange={(e) => setFilters({ ...filters, limit: parseInt(e.target.value) })}
@@ -306,6 +303,12 @@ export function Jobs() {
                       <div>
                         <h3 className="font-medium text-gray-900">{job.filename}</h3>
                         <p className="text-sm text-gray-500">ID: {job.id}</p>
+                        {job.cluster_name && (
+                          <span className="inline-flex items-center mt-1 px-2 py-0.5 text-xs font-medium bg-purple-100 text-purple-800 rounded-full">
+                            <Server className="w-3 h-3 mr-1" />
+                            {job.cluster_name}
+                          </span>
+                        )}
                         {job.status === 'COMPLETED' && getIncidentCount(job) > 0 && (
                           <Link
                             to="/incidents"
@@ -335,13 +338,7 @@ export function Jobs() {
                         <Eye className="w-4 h-4" />
                       </button>
                       {(job.status === 'PENDING' || job.status === 'PROCESSING') && (
-                        <button
-                          onClick={() => handleCancelJob(job.id)}
-                          className="p-1 text-red-400 hover:text-red-600"
-                          disabled={cancelJobMutation.isLoading}
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
+                        <CancelJobButton jobId={job.id} />
                       )}
                     </div>
                   </div>
@@ -370,6 +367,12 @@ export function Jobs() {
                           <span className="font-medium text-gray-700">Created:</span>
                           <span className="ml-2 text-gray-600">{formatDate(job.created_at)}</span>
                         </div>
+                        {job.cluster_name && (
+                          <div>
+                            <span className="font-medium text-gray-700">Cluster:</span>
+                            <span className="ml-2 text-gray-600">{job.cluster_name}</span>
+                          </div>
+                        )}
                         {job.started_at && (
                           <div>
                             <span className="font-medium text-gray-700">Started:</span>

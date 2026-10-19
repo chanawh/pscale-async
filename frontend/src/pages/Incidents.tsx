@@ -21,12 +21,15 @@ import { WorkDetailsModal } from '@/components/WorkDetailsModal'
 import { EscalateModal } from '@/components/EscalateModal'
 import { RawLog } from '@/components/RawLog'
 import { ActivityTimeline } from '@/components/ActivityTimeline'
+import { ClusterPicker } from '@/components/ClusterPicker'
+import { useClusters } from '@/hooks/useClusters'
 import { Summary, Escalation } from '@/types'
 
 export function Incidents() {
   const [filters, setFilters] = useState({
     severity: '',
     status: '',
+    cluster: '',
     limit: 50,
     skip: 0
   })
@@ -38,6 +41,7 @@ export function Incidents() {
   const [expandedActivity, setExpandedActivity] = useState<number | null>(null)
 
   const queryClient = useQueryClient()
+  const { clusters } = useClusters()
 
   const {
     data: incidentsData,
@@ -208,6 +212,12 @@ export function Incidents() {
               <option value="ESCALATED">Escalated</option>
             </select>
           </div>
+
+          <ClusterPicker
+            clusters={clusters}
+            value={filters.cluster}
+            onChange={(cluster) => handleFilterChange('cluster', cluster)}
+          />
         </div>
 
         <div className="flex space-x-1 mt-6 border-b border-gray-200">

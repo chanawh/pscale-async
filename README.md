@@ -603,6 +603,19 @@ POST /api/v1/ingest/stream
 }
 ```
 
+**Cancel semantics** (`POST /jobs/{id}/cancel`): revokes every tracked Celery
+task id with `terminate=True` *before* moving the job to `CANCELLED`, and
+publishes a `job.cancelled` domain event. The contract is honest about
+failure — no silent no-ops:
+
+| Status | Meaning |
+|--------|---------|
+| `200` | Cancelled; response lists `revoked_task_ids` |
+| `404` | No such job |
+| `409` | Job already terminal (`COMPLETED`/`FAILED`/`CANCELLED`) |
+| `422` | Job has no tracked task ids (created before task tracking); nothing to revoke |
+| `503` | Broker unreachable — the job keeps its state, retry is safe |
+
 #### 📡 gRPC Streaming (`JobService`, port 50051)
 
 A typed alternative to SSE for programmatic clients. It consumes the **same**

@@ -42,10 +42,11 @@ export interface Job {
   id: string
   filename: string
   file_size?: number
-  status: 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'FAILED'
+  status: 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'FAILED' | 'CANCELLED'
   progress: number
   result_summary?: string
   error_message?: string
+  cluster_name?: string | null
   started_at?: string
   completed_at?: string
   created_at: string

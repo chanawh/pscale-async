@@ -14,6 +14,7 @@ import {
 } from 'lucide-react'
 import toast from 'react-hot-toast'
 import { FallbackDashboard } from '@/components/FallbackDashboard'
+import { CancelJobButton } from '@/components/CancelJobButton'
 
 export function Dashboard() {
   console.log('Dashboard component - rendering')
@@ -131,15 +132,8 @@ export function Dashboard() {
     toast.success('Dashboard data refreshed')
   }
 
-  const handleCancelJob = async (jobId: string) => {
-    try {
-      await apiService.cancelJob(jobId)
-      void refetchJobs()
-      toast.success('Job cancelled successfully')
-    } catch {
-      toast.error('Failed to cancel job')
-    }
-  }
+  // Job cancellation is owned by <CancelJobButton/> (confirm-then-cancel
+  // with honest 404/409/422/503 states) — see the recent-jobs list below.
 
   // ─────────────────────────────────────────────────────────────────────────────
   // UI helpers
@@ -480,13 +474,11 @@ export function Dashboard() {
                       </div>
                     </div>
                     {job.status === 'PROCESSING' && (
-                      <button
-                        onClick={() => handleCancelJob(job.id)}
+                      <CancelJobButton
+                        jobId={job.id}
                         className="ml-2 text-red-600 hover:text-red-800"
                         title="Cancel job"
-                      >
-                        <XCircle className="w-4 h-4" />
-                      </button>
+                      />
                     )}
                   </div>
                 </div>
