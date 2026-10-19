@@ -44,7 +44,10 @@ class ApiService {
       (error) => {
         // Skip toast for auth endpoints (login handles its own errors)
         const isAuthEndpoint = error.config?.url?.includes('/auth/')
-        if (!isAuthEndpoint) {
+        // Endpoints that own their error UX (e.g. job cancel's 404/409/422/503
+        // contract) opt out via header to avoid double-reporting.
+        const skipGlobalToast = error.config?.headers?.['X-No-Global-Toast'] === 'true'
+        if (!isAuthEndpoint && !skipGlobalToast) {
           const message = error.response?.data?.detail || error.message || 'An error occurred'
           toast.error(message)
         }
@@ -149,6 +152,7 @@ class ApiService {
   async getIncidents(params?: {
     severity?: string
     status?: string
+    cluster?: string
     limit?: number
     skip?: number
   }): Promise<{
@@ -174,6 +178,7 @@ class ApiService {
   // Job endpoints
   async getJobs(params?: {
     status?: string
+    cluster?: string
     limit?: number
     skip?: number
   }): Promise<{
@@ -191,8 +196,19 @@ class ApiService {
     return response.data
   }
 
-  async cancelJob(id: string): Promise<void> {
-    await this.client.post(`/api/v1/jobs/${id}/cancel`)
+  async cancelJob(id: string): Promise<{
+    id: string
+    status: string
+    revoked_task_ids: string[]
+    message: string
+  }> {
+    // The CancelJobButton owns cancel-specific messaging for the
+    // 404/409/422/503 contract; skip the global error toast so a
+    // failed cancel is reported exactly once.
+    const response = await this.client.post(`/api/v1/jobs/${id}/cancel`, {}, {
+      headers: { 'X-No-Global-Toast': 'true' },
+    })
+    return response.data
   }
 
   async uploadLogFile(file: File, nodeHostname?: string, description?: string): Promise<{ job_id: string }> {
