@@ -87,6 +87,38 @@ def startup_event():
         db.close()
 
 
+# gRPC streaming server (typed alternative to SSE, same event bus).
+# Runs on its own port in gRPC's thread pool; started/stopped with the app.
+_grpc_server = None
+
+
+@app.on_event("startup")
+def start_grpc_server():
+    """Start the gRPC JobService alongside FastAPI (unless disabled)."""
+    global _grpc_server
+    if not settings.grpc_enabled:
+        print("gRPC streaming disabled (GRPC_ENABLED=false)")
+        return
+    try:
+        from src.grpc.server import create_server
+
+        _grpc_server = create_server(settings.grpc_port)
+        _grpc_server.start()
+        print(f"gRPC JobService listening on port {settings.grpc_port}")
+    except Exception as e:  # pragma: no cover - startup path, logged loudly
+        print(f"Warning: could not start gRPC server: {e}")
+
+
+@app.on_event("shutdown")
+def stop_grpc_server():
+    """Stop the gRPC server gracefully on app shutdown."""
+    global _grpc_server
+    if _grpc_server is not None:
+        _grpc_server.stop(grace=5)
+        _grpc_server = None
+        print("gRPC JobService stopped")
+
+
 @app.get("/health", tags=["health"])
 def health_check(db: Session = Depends(get_db)):
     """Health check endpoint - returns degraded status instead of 503 for partial failures"""

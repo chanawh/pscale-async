@@ -47,6 +47,12 @@ class Settings(BaseSettings):
     api_port: int = 8000
     api_debug: bool = False
 
+    # gRPC streaming (typed alternative to SSE over the same event bus).
+    # Runs alongside FastAPI on its own port; lifecycle is tied to the
+    # app's startup/shutdown handlers. Disable with GRPC_ENABLED=false.
+    grpc_enabled: bool = True
+    grpc_port: int = 50051
+
     # Security
     # No default is committed. If SECRET_KEY is unset, an ephemeral per-process
     # key is generated (JWTs won't survive restarts). Set SECRET_KEY in prod.

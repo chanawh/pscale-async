@@ -603,8 +603,57 @@ POST /api/v1/ingest/stream
 }
 ```
 
-#### 🎯 Patterns (`/api/v1/patterns`)
+#### 📡 gRPC Streaming (`JobService`, port 50051)
 
+A typed alternative to SSE for programmatic clients. It consumes the **same**
+domain event bus as SSE -- no second event system -- and runs alongside
+FastAPI on its own port (`GRPC_PORT`, default `50051`; disable with
+`GRPC_ENABLED=false`). Service definition: [`proto/jobs.proto`](proto/jobs.proto);
+generated stubs are committed under `src/grpc/` so CI needs no protoc toolchain
+(regenerate with `python -m grpc_tools.protoc -Iproto --python_out=src/grpc
+--grpc_python_out=src/grpc proto/jobs.proto`, then re-apply the
+package-relative import patch noted in `jobs_pb2_grpc.py`).
+
+| RPC | Streams | Notes |
+|-----|---------|-------|
+| `StreamJobEvents` | `JobEvent` | Snapshot, then live progress/incidents, then a terminal event (`job.completed`/`job.failed`/`job.cancelled`) that ends the stream. `job.cancelled` closes the stream cleanly -- a cancelled job never leaves a client hanging. |
+| `StreamIncidents` | `Incident` | Incidents as created, with DB-backed replay: `from_incident_id` replays everything committed after that id first (0 = all so far), then goes live. |
+
+Auth is the same JWT bearer token as REST, passed as
+`authorization: Bearer <token>` gRPC metadata and validated with the
+identical decode + user-exists check -- unauthenticated calls are rejected
+with `UNAUTHENTICATED` before any subscription happens.
+
+**SSE vs gRPC -- when to use which:** SSE stays the simple path (browsers,
+the React frontend, curl debugging). Reach for gRPC when you want a typed
+contract, HTTP/2 flow-control backpressure, and reconnect semantics without
+re-parsing text frames.
+
+**Resume semantics (honest):** the bus is pub/sub with no replay log, so
+`StreamJobEvents(from_sequence=N)` means *snapshot + live*, not replay --
+a reconnect to an already-terminal job gets snapshot + terminal immediately.
+`StreamIncidents(from_incident_id=N)` genuinely replays from the database.
+
+**Example client:**
+```python
+import grpc
+from src.grpc import jobs_pb2, jobs_pb2_grpc
+
+channel = grpc.insecure_channel("localhost:50051")
+stub = jobs_pb2_grpc.JobServiceStub(channel)
+md = (("authorization", f"Bearer {token}"),)
+
+for event in stub.StreamJobEvents(
+    jobs_pb2.JobEventsRequest(job_id="<job-id>"), metadata=md
+):
+    print(event.sequence, event.type)
+    if event.type == "incident.created":
+        print("  incident:", event.incident.title, event.incident.severity)
+    if event.type in ("job.completed", "job.failed", "job.cancelled"):
+        break
+```
+
+#### 🎯 Patterns (`/api/v1/patterns`)
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | GET | `/patterns` | List patterns (with filtering) |
